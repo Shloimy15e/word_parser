@@ -295,19 +295,18 @@ def convert_to_json(input_path, output_path, book, sefer, parshah, year, skip_pa
     
     # Build book name (parshah is the "book" in the JSON structure)
     parshah_name = parshah if skip_parshah_prefix else f"פרשת {parshah}"
+    book_name_with_year = f"{parshah_name} {year}"
+    
+    # Get current date
+    from datetime import datetime
+    current_date = datetime.now().strftime("%Y-%m-%d")
     
     # Create JSON structure
     json_data = {
-        "book_name_he": parshah_name,
-        "book_name_en": parshah,  # Keep Hebrew as fallback for English
+        "book_name_he": book_name_with_year,
+        "book_name_en": "",
         "book_metadata": {
-            "sefer_he": sefer,
-            "sefer_en": sefer,
-            "collection_he": book,
-            "collection_en": book,
-            "year_he": year,
-            "year_en": year,
-            "source": "Word Document Conversion"
+            "date": current_date
         },
         "chunks": []
     }
@@ -344,11 +343,6 @@ def convert_to_json(input_path, output_path, book, sefer, parshah, year, skip_pa
             chunk = {
                 "chunk_id": chunk_id,
                 "chunk_metadata": {
-                    "chunk_title": f"{parshah_name} - קטע {chunk_id}",
-                    "sefer": sefer,
-                    "parshah": parshah_name,
-                    "year": year,
-                    "collection": book
                 },
                 "text": txt
             }
