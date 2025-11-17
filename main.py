@@ -1,4 +1,5 @@
 import re
+import json
 import argparse
 import tempfile
 from pathlib import Path
@@ -285,6 +286,80 @@ def reformat_docx(input_path, output_path, book, sefer, parshah, year, skip_pars
     new_doc.save(output_path)
 
 
+def convert_to_json(input_path, output_path, book, sefer, parshah, year, skip_parshah_prefix=False):
+    """
+    Convert docx to JSON structure with chunks.
+    Each paragraph becomes a chunk.
+    """
+    source = Document(input_path)
+    
+    # Build book name (parshah is the "book" in the JSON structure)
+    parshah_name = parshah if skip_parshah_prefix else f"פרשת {parshah}"
+    
+    # Create JSON structure
+    json_data = {
+        "book_name_he": parshah_name,
+        "book_name_en": parshah,  # Keep Hebrew as fallback for English
+        "book_metadata": {
+            "sefer_he": sefer,
+            "sefer_en": sefer,
+            "collection_he": book,
+            "collection_en": book,
+            "year_he": year,
+            "year_en": year,
+            "source": "Word Document Conversion"
+        },
+        "chunks": []
+    }
+    
+    # Process body text with smart header skipping
+    in_header_section = True
+    chunk_id = 1
+    
+    for para in source.paragraphs:
+        full_text = para.text
+        txt = full_text.strip()
+        
+        # If we're still in the header section
+        if in_header_section:
+            # Check if this looks like substantial content
+            if txt and should_start_content(txt):
+                in_header_section = False
+                # Fall through to include this paragraph
+            # Skip if it's an old header
+            elif txt and is_old_header(txt):
+                continue
+            # Skip empty paragraphs in header section
+            elif not txt:
+                continue
+            else:
+                continue
+        
+        # After header section, skip old headers but keep everything else
+        if txt and is_old_header(txt):
+            continue
+        
+        # Only add non-empty paragraphs as chunks
+        if txt:
+            chunk = {
+                "chunk_id": chunk_id,
+                "chunk_metadata": {
+                    "chunk_title": f"{parshah_name} - קטע {chunk_id}",
+                    "sefer": sefer,
+                    "parshah": parshah_name,
+                    "year": year,
+                    "collection": book
+                },
+                "text": txt
+            }
+            json_data["chunks"].append(chunk)
+            chunk_id += 1
+    
+    # Write JSON file
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(json_data, f, ensure_ascii=False, indent=2)
+
+
 # -------------------------------
 # Main CLI entry point
 # -------------------------------
@@ -302,6 +377,10 @@ def main():
     parser.add_argument(
         "--skip-parshah-prefix", action="store_true", 
         help="Skip adding 'פרשת' prefix to parshah name in Heading 3"
+    )
+    parser.add_argument(
+        "--json", action="store_true",
+        help="Output as JSON structure instead of formatted Word documents"
     )
     parser.add_argument(
         "--docs", default="docs", help="Input folder containing .docx files or subfolders"
@@ -322,6 +401,10 @@ def main():
         return
     
     out_dir.mkdir(exist_ok=True)
+    
+    # Create json subdirectory if needed
+    if args.json:
+        (out_dir / "json").mkdir(exist_ok=True)
 
     # Check if using folder structure mode (no sefer/parshah specified)
     if not args.sefer and not args.parshah:
@@ -347,7 +430,10 @@ def main():
                 continue
             
             # Create output subdirectory
-            out_subdir = out_dir / sefer / parshah
+            if args.json:
+                out_subdir = out_dir / "json" / sefer / parshah
+            else:
+                out_subdir = out_dir / sefer / parshah
             out_subdir.mkdir(parents=True, exist_ok=True)
             
             print(f"📂 {parshah} ({len(files)} file(s))")
@@ -360,8 +446,12 @@ def main():
                         print(f"  [{i}/{len(files)}] ⚠️ Skipping {path.name}: cannot extract year")
                         continue
                     
-                    out_name = f"{Path(path).stem}-formatted.docx"
-                    out_path = out_subdir / out_name
+                    if args.json:
+                        out_name = f"{Path(path).stem}.json"
+                        out_path = out_subdir / out_name
+                    else:
+                        out_name = f"{Path(path).stem}-formatted.docx"
+                        out_path = out_subdir / out_name
                     
                     print(f"  [{i}/{len(files)}] {path.stem} → {out_path.name} ...", end=" ")
                     
@@ -371,7 +461,10 @@ def main():
                         temp_docx = convert_doc_to_docx(path)
                         input_path = temp_docx
                     
-                    reformat_docx(input_path, out_path, args.book, sefer, parshah, year, args.skip_parshah_prefix)
+                    if args.json:
+                        convert_to_json(input_path, out_path, args.book, sefer, parshah, year, args.skip_parshah_prefix)
+                    else:
+                        reformat_docx(input_path, out_path, args.book, sefer, parshah, year, args.skip_parshah_prefix)
                     print("✓ done")
                     total_success += 1
                     total_files += 1
@@ -411,9 +504,13 @@ def main():
                 print(f"[{i}/{len(files)}] ⚠️ Skipping {path.name}: cannot extract year")
                 continue
             
-            # Output filename is input filename + -formatted
-            out_name = f"{Path(path).stem}-formatted.docx"
-            out_path = out_dir / out_name
+            # Output filename based on format
+            if args.json:
+                out_name = f"{Path(path).stem}.json"
+                out_path = out_dir / "json" / out_name
+            else:
+                out_name = f"{Path(path).stem}-formatted.docx"
+                out_path = out_dir / out_name
             
             print(f"[{i}/{len(files)}] Processing {path.stem} → {out_path.name} ...", end=" ")
             
@@ -425,7 +522,10 @@ def main():
                 input_path = temp_docx
             
             # Pass the year extracted from original filename
-            reformat_docx(input_path, out_path, args.book, args.sefer, args.parshah, year, args.skip_parshah_prefix)
+            if args.json:
+                convert_to_json(input_path, out_path, args.book, args.sefer, args.parshah, year, args.skip_parshah_prefix)
+            else:
+                reformat_docx(input_path, out_path, args.book, args.sefer, args.parshah, year, args.skip_parshah_prefix)
             print("✓ done")
             success_count += 1
             
