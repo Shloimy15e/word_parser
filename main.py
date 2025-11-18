@@ -127,36 +127,34 @@ def convert_doc_to_docx(doc_path):
 def extract_year(filename_stem):
     """
     Extract year from filename.
-    Looks for Hebrew year pattern like תש״כ, תשכח, etc.
+    Looks for Hebrew year pattern like תש״כ, תשכ_ז תשכח, תשנ״ט, etc.
+    Years always start with תש (taf-shin) and are 3-4 characters long.
     """
     stem = filename_stem.strip()
     
-    # Split by common separators
-    parts = re.split(r'[\s\-–—]+', stem)
+    # Split by common separators (including underscore)
+    parts = re.split(r'[\s\-–—_]+', stem)
     parts = [p.strip() for p in parts if p.strip()]
     
-    # Look for year pattern (starts with ת and contains Hebrew letters)
-    year_pattern = r'^ת[\u0590-\u05FF״׳\"]+'
+    # Look for year pattern: must start with תש and be 3-4 chars total
+    # This excludes parshah names like תזריע, תבוא, etc.
+    year_pattern = r'^תש[\u0590-\u05FF״׳\"]$|^תש[\u0590-\u05FF״׳\"][\u0590-\u05FF״׳\"]$'
     
     for part in parts:
-        # Check if it's Hebrew and starts with ת
-        if re.match(year_pattern, part):
+        # Check if it matches the תש year pattern and is 3-4 chars
+        if re.match(year_pattern, part) and 3 <= len(part) <= 4:
             return part
     
-    # Fallback: look for any part with Hebrew characters starting with ת
+    # Fallback: look for תש pattern with correct length
     for part in parts:
-        if part and part[0] == 'ת' and any('\u0590' <= c <= '\u05FF' for c in part):
+        if len(part) >= 3 and len(part) <= 4 and part[0:2] == 'תש':
             return part
     
-    # Last resort: return last part if it contains Hebrew
-    for part in reversed(parts):
-        if any('\u0590' <= c <= '\u05FF' for c in part):
-            return part
-    
-    return parts[-1] if parts else ""
+    return None
 
 
-def reformat_docx(input_path, output_path, book, sefer, parshah, year, skip_parshah_prefix=False):
+
+def reformat_docx(input_path, output_path, book, sefer, parshah, filename, skip_parshah_prefix=False):
     source = Document(input_path)
     new_doc = Document()
     configure_styles(new_doc)
@@ -168,7 +166,7 @@ def reformat_docx(input_path, output_path, book, sefer, parshah, year, skip_pars
         ("Heading 1", book),
         ("Heading 2", sefer),
         ("Heading 3", parshah_heading),
-        ("Heading 4", year),
+        ("Heading 4", filename),
     ]:
         if not text:
             continue
@@ -286,16 +284,12 @@ def reformat_docx(input_path, output_path, book, sefer, parshah, year, skip_pars
     new_doc.save(output_path)
 
 
-def convert_to_json(input_path, output_path, book, sefer, parshah, year, skip_parshah_prefix=False):
+def convert_to_json(input_path, output_path, book, sefer, title, filename, skip_parshah_prefix=False):
     """
     Convert docx to JSON structure with chunks.
     Each paragraph becomes a chunk.
     """
     source = Document(input_path)
-    
-    # Build book name (parshah is the "book" in the JSON structure)
-    parshah_name = parshah if skip_parshah_prefix else f"פרשת {parshah}"
-    book_name_with_year = f"{parshah_name} {year}"
     
     # Get current date
     from datetime import datetime
@@ -303,7 +297,7 @@ def convert_to_json(input_path, output_path, book, sefer, parshah, year, skip_pa
     
     # Create JSON structure
     json_data = {
-        "book_name_he": book_name_with_year,
+        "book_name_he": title,
         "book_name_en": "",
         "book_metadata": {
             "date": current_date
@@ -342,8 +336,7 @@ def convert_to_json(input_path, output_path, book, sefer, parshah, year, skip_pa
         if txt:
             chunk = {
                 "chunk_id": chunk_id,
-                "chunk_metadata": {
-                },
+                "chunk_metadata": {},
                 "text": txt
             }
             json_data["chunks"].append(chunk)
@@ -435,16 +428,20 @@ def main():
             for i, path in enumerate(files, 1):
                 temp_docx = None
                 try:
-                    year = extract_year(Path(path).stem)
+                    # Extract title from filename (remove -formatted if present)
+                    filename_stem = Path(path).stem
+                    title = filename_stem.replace("-formatted", "")
+                    
+                    year = extract_year(title)
                     if not year:
                         print(f"  [{i}/{len(files)}] ⚠️ Skipping {path.name}: cannot extract year")
                         continue
                     
                     if args.json:
-                        out_name = f"{Path(path).stem}.json"
+                        out_name = f"{filename_stem}.json"
                         out_path = out_subdir / out_name
                     else:
-                        out_name = f"{Path(path).stem}-formatted.docx"
+                        out_name = f"{filename_stem.replace('-formatted', '')}-formatted.docx"
                         out_path = out_subdir / out_name
                     
                     print(f"  [{i}/{len(files)}] {path.stem} → {out_path.name} ...", end=" ")
@@ -456,9 +453,9 @@ def main():
                         input_path = temp_docx
                     
                     if args.json:
-                        convert_to_json(input_path, out_path, args.book, sefer, parshah, year, args.skip_parshah_prefix)
+                        convert_to_json(input_path, out_path, args.book, sefer, title, year, args.skip_parshah_prefix)
                     else:
-                        reformat_docx(input_path, out_path, args.book, sefer, parshah, year, args.skip_parshah_prefix)
+                        reformat_docx(input_path, out_path, args.book, sefer, parshah, title, args.skip_parshah_prefix)
                     print("✓ done")
                     total_success += 1
                     total_files += 1
@@ -500,10 +497,14 @@ def main():
             
             # Output filename based on format
             if args.json:
-                out_name = f"{Path(path).stem}.json"
+                # Extract title from filename (remove -formatted if present)
+                filename_stem = Path(path).stem
+                title = filename_stem.replace("-formatted", "")
+                out_name = f"{filename_stem}.json"
                 out_path = out_dir / "json" / out_name
             else:
-                out_name = f"{Path(path).stem}-formatted.docx"
+                title = args.parshah
+                out_name = f"{filename_stem.replace('-formatted', '')}-formatted.docx"
                 out_path = out_dir / out_name
             
             print(f"[{i}/{len(files)}] Processing {path.stem} → {out_path.name} ...", end=" ")
@@ -515,11 +516,11 @@ def main():
                 temp_docx = convert_doc_to_docx(path)
                 input_path = temp_docx
             
-            # Pass the year extracted from original filename
+            # Pass the title from filename
             if args.json:
-                convert_to_json(input_path, out_path, args.book, args.sefer, args.parshah, year, args.skip_parshah_prefix)
+                convert_to_json(input_path, out_path, args.book, args.sefer, title, year, args.skip_parshah_prefix)
             else:
-                reformat_docx(input_path, out_path, args.book, args.sefer, args.parshah, year, args.skip_parshah_prefix)
+                reformat_docx(input_path, out_path, args.book, args.sefer, title, title, args.skip_parshah_prefix)
             print("✓ done")
             success_count += 1
             
