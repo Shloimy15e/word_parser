@@ -676,7 +676,9 @@ def convert_to_json(
 
         # Only add non-empty paragraphs as chunks
         if txt:
-            chunk = {"chunk_id": chunk_id, "chunk_metadata": {}, "text": txt}
+            chunk = {"chunk_id": chunk_id, "chunk_metadata": {
+                "chunk_title": f"Paragraph {chunk_id}"
+            }, "text": txt}
             json_data["chunks"].append(chunk)
             chunk_id += 1
 
