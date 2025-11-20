@@ -3,6 +3,8 @@ import json
 import argparse
 import tempfile
 import traceback
+import zipfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from docx import Document
 from docx.shared import Pt, RGBColor
@@ -146,14 +148,401 @@ def convert_doc_to_docx(doc_path):
         word.Quit()
 
 
+def is_dos_encoded_file(file_path):
+    """
+    Check if a file is a DOS-encoded Hebrew text file (CP862).
+    Returns True if it appears to be a DOS-encoded text file with Hebrew content.
+    """
+    if file_path.suffix:  # DOS files typically have no extension
+        return False
+    
+    # Skip directories
+    if not file_path.is_file():
+        return False
+    
+    try:
+        with open(file_path, "rb") as f:
+            raw_data = f.read(2048)  # Read first 2KB for better detection
+        
+        # File must have some content
+        if len(raw_data) == 0:
+            return False
+            
+        # Try to decode as CP862 (Hebrew DOS)
+        try:
+            text = raw_data.decode('cp862', errors='strict')
+            # Check if it contains Hebrew characters
+            hebrew_chars = sum(1 for c in text if '\u0590' <= c <= '\u05FF')
+            total_chars = len([c for c in text if c.isprintable() and not c.isspace()])
+            
+            # If more than 5% Hebrew characters (lowered threshold), likely a DOS Hebrew file
+            # Also check that file is mostly text (not binary)
+            if total_chars > 0 and hebrew_chars > total_chars * 0.05:
+                return True
+        except (UnicodeDecodeError, UnicodeError):
+            # If strict decoding fails, try with errors='ignore'
+            try:
+                text = raw_data.decode('cp862', errors='ignore')
+                hebrew_chars = sum(1 for c in text if '\u0590' <= c <= '\u05FF')
+                # More lenient check with ignore errors
+                if hebrew_chars > 10:  # At least 10 Hebrew characters
+                    return True
+            except:
+                pass
+            
+        return False
+    except Exception:
+        return False
+
+
+def sanitize_xml_text(text):
+    """
+    Remove characters that are not valid in XML.
+    XML 1.0 valid characters: #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD]
+    """
+    # Define valid XML character ranges
+    def is_valid_xml_char(c):
+        codepoint = ord(c)
+        return (
+            codepoint == 0x09 or  # Tab
+            codepoint == 0x0A or  # Line feed
+            codepoint == 0x0D or  # Carriage return
+            (0x20 <= codepoint <= 0xD7FF) or
+            (0xE000 <= codepoint <= 0xFFFD)
+        )
+    
+    return ''.join(c for c in text if is_valid_xml_char(c))
+
+
+def clean_dos_text(text):
+    """
+    Clean DOS text - remove ALL numbers, brackets, and formatting codes.
+    Keep ONLY Hebrew text and basic punctuation.
+    """
+    lines = text.split('\n')
+    cleaned_lines = []
+    
+    for line in lines:
+        line = line.strip()
+        
+        # Preserve empty lines
+        if not line:
+            cleaned_lines.append('')
+            continue
+        
+        # Skip formatting lines starting with period
+        if line.startswith('.'):
+            continue
+        
+        # Must have Hebrew content
+        if not any('\u0590' <= c <= '\u05FF' for c in line):
+            continue
+        
+        temp = line
+        
+        # ============================================================
+        # Remove ALL garbage - nuclear option
+        # ============================================================
+        
+        # Remove >number< footnote markers
+        temp = re.sub(r'>\d+<', '', temp)
+        
+        # Remove BNARF/OISAR/BSNF markers
+        temp = re.sub(r'(BNARF|OISAR|BSNF)\s+[A-Z]\s+\d+[\*]?', '', temp)
+        
+        # Remove ALL brackets
+        temp = re.sub(r'[<>]', '', temp)
+        
+        # Remove ALL numbers (integers and decimals)
+        temp = re.sub(r'\d+\.?\d*', '', temp)
+        
+        # Remove asterisks
+        temp = re.sub(r'\*', '', temp)
+        
+        # Remove multiple dashes
+        temp = re.sub(r'[-–—]{2,}', '', temp)
+        
+        # Remove English letters (codes)
+        temp = re.sub(r'[A-Za-z]+', '', temp)
+        
+        # Clean up spaces
+        temp = re.sub(r'\s+', ' ', temp)
+        temp = temp.strip()
+        
+        # Only keep if has Hebrew
+        if temp and any('\u0590' <= c <= '\u05FF' for c in temp):
+            cleaned_lines.append(temp)
+    
+    return '\n'.join(cleaned_lines)
+
+
+def convert_dos_to_docx(dos_path):
+    """
+    Convert DOS-encoded Hebrew text file to .docx.
+    Returns path to temporary .docx file.
+    """
+    # Read the DOS file
+    with open(dos_path, "rb") as f:
+        raw_data = f.read()
+    
+    # Decode from CP862 (Hebrew DOS encoding)
+    text = raw_data.decode('cp862', errors='ignore')
+    
+    # Clean DOS formatting codes and garbage
+    text = clean_dos_text(text)
+    
+    # Sanitize text to remove invalid XML characters
+    text = sanitize_xml_text(text)
+    
+    # Create a new document
+    doc = Document()
+    
+    # Split into paragraphs and add to document
+    paragraphs = text.split('\n')
+    for para_text in paragraphs:
+        para_text = para_text.strip()
+        if para_text:
+            p = doc.add_paragraph(para_text)
+            p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+            p.paragraph_format.right_to_left = True
+    
+    # Save to temp file
+    temp_docx = tempfile.NamedTemporaryFile(delete=False, suffix=".docx")
+    temp_docx.close()
+    doc.save(temp_docx.name)
+    
+    return Path(temp_docx.name)
+
+
+def extract_text_from_idml(idml_path):
+    """
+    Extract text content from an IDML (InDesign Markup Language) file.
+    IDML is a ZIP archive containing XML files.
+    Returns a list of text content strings.
+    """
+    texts = []
+    
+    try:
+        with zipfile.ZipFile(idml_path, 'r') as zip_file:
+            # IDML files contain Stories folder with XML files containing text
+            story_files = [name for name in zip_file.namelist() if name.startswith('Stories/') and name.endswith('.xml')]
+            
+            for story_file in story_files:
+                with zip_file.open(story_file) as f:
+                    tree = ET.parse(f)
+                    root = tree.getroot()
+                    
+                    # Extract all text content from the XML
+                    # IDML uses various text elements, we'll get all text content
+                    for elem in root.iter():
+                        if elem.text and elem.text.strip():
+                            text = elem.text.strip()
+                            # Filter out standalone "0" or other noise characters
+                            if text != "0" and len(text) > 0:
+                                texts.append(text)
+                        if elem.tail and elem.tail.strip():
+                            tail = elem.tail.strip()
+                            # Filter out standalone "0" or other noise characters
+                            if tail != "0" and len(tail) > 0:
+                                texts.append(tail)
+    except Exception as e:
+        print(f"Warning: Error extracting text from IDML: {e}")
+    
+    return texts
+
+
+def convert_idml_to_docx(idml_path):
+    """
+    Convert IDML file to .docx by extracting text content.
+    Returns path to temporary .docx file.
+    """
+    # Extract text from IDML
+    texts = extract_text_from_idml(idml_path)
+    
+    if not texts:
+        raise ValueError(f"No text content found in IDML file: {idml_path}")
+    
+    # Create a new document
+    doc = Document()
+    
+    # Add extracted text as paragraphs
+    for text in texts:
+        if text.strip():
+            p = doc.add_paragraph(text)
+            p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+            p.paragraph_format.right_to_left = True
+    
+    # Save to temp file
+    temp_docx = tempfile.NamedTemporaryFile(delete=False, suffix=".docx")
+    temp_docx.close()
+    doc.save(temp_docx.name)
+    
+    return Path(temp_docx.name)
+
+
+def get_processable_files(directory):
+    """
+    Get files to process from a directory.
+    Priority order: .docx > .doc > .idml > DOS-encoded (no extension)
+    Returns only files of ONE type (the highest priority type found).
+    """
+    files_by_type = {
+        'docx': list(directory.glob("*.docx")),
+        'doc': list(directory.glob("*.doc")),
+        'idml': list(directory.glob("*.idml")),
+        'dos': []
+    }
+    
+    # Find DOS-encoded files (no extension)
+    for file in directory.iterdir():
+        if file.is_file() and not file.suffix and is_dos_encoded_file(file):
+            files_by_type['dos'].append(file)
+    
+    # Return files in priority order
+    for file_type in ['docx', 'doc', 'idml', 'dos']:
+        if files_by_type[file_type]:
+            return files_by_type[file_type]
+    
+    return []
+
+
+def convert_to_docx(file_path):
+    """
+    Convert any supported file format to .docx.
+    Returns tuple: (path_to_docx, needs_cleanup)
+    - path_to_docx: Path object to the .docx file
+    - needs_cleanup: Boolean indicating if the file is temporary and should be deleted
+    """
+    suffix = file_path.suffix.lower()
+    
+    if suffix == '.docx':
+        # Already a .docx file, no conversion needed
+        return file_path, False
+    
+    elif suffix == '.doc':
+        # Convert .doc to .docx
+        temp_docx = convert_doc_to_docx(file_path)
+        return temp_docx, True
+    
+    elif suffix == '.idml':
+        # Convert .idml to .docx
+        temp_docx = convert_idml_to_docx(file_path)
+        return temp_docx, True
+    
+    elif not suffix and is_dos_encoded_file(file_path):
+        # Convert DOS-encoded file to .docx
+        temp_docx = convert_dos_to_docx(file_path)
+        return temp_docx, True
+    
+    else:
+        raise ValueError(f"Unsupported file type: {file_path}")
+
+
 # ----------------------------------------
 # Core conversion: one docx → formatted docx
 # ----------------------------------------
+def number_to_hebrew_gematria(num):
+    """
+    Convert a number to Hebrew gematria notation.
+    Examples: 1 → א, 2 → ב, 10 → י, 11 → יא, 20 → כ, 21 → כא, etc.
+    """
+    if num <= 0:
+        return str(num)
+    
+    # Hebrew letters and their numeric values
+    ones = ['', 'א', 'ב', 'ג', 'ד', 'ה', 'ו', 'ז', 'ח', 'ט']  # 0-9
+    tens = ['', 'י', 'כ', 'ל', 'מ', 'ן', 'ס', 'ע', 'פ', 'צ']  # 0, 10-90
+    hundreds = ['', 'ק', 'ר', 'ש', 'ת']  # 0, 100-400
+    
+    result = ''
+    
+    # Handle hundreds
+    if num >= 100:
+        hundreds_digit = min(num // 100, 4)
+        result += hundreds[hundreds_digit]
+        num %= 100
+    
+    # Special cases for 15 and 16 (avoid using God's name)
+    if num == 15:
+        return result + 'טו'
+    elif num == 16:
+        return result + 'טז'
+    
+    # Handle tens
+    if num >= 10:
+        tens_digit = num // 10
+        result += tens[tens_digit]
+        num %= 10
+    
+    # Handle ones
+    if num > 0:
+        result += ones[num]
+    
+    return result if result else str(num)
+
+
+def extract_heading4_info(filename_stem):
+    """
+    Extract heading 4 information from filename.
+    Handles special patterns:
+      - "PEREK1" or "perek1" → "פרק א"
+      - "PEREK2" → "פרק ב"
+      - "PEREK11" → "פרק יא"
+      - "PEREK01A" or "perek1a" → "פרק א 1" (letter becomes number, number becomes letter)
+      - "MEKOROS" or "MKOROS" → "מקורות"
+      - "MEKOROS1" → "מקורות א"
+      - "HAKDOMO" or "HAKDOMO1" → "הקדמה" or "הקדמה א"
+    Returns the Hebrew string or None if no pattern matched.
+    """
+    stem = filename_stem.strip().lower()
+    
+    # Check for MEKOROS/MKOROS with optional number
+    mekoros_match = re.match(r'^m?koros0*(\d*)$', stem, re.IGNORECASE)
+    if mekoros_match:
+        num_str = mekoros_match.group(1)
+        if num_str:
+            number = int(num_str)
+            hebrew_gematria = number_to_hebrew_gematria(number)
+            return f"מקורות {hebrew_gematria}"
+        else:
+            return 'מקורות'
+    
+    # Check for HAKDOMO with optional number
+    hakdomo_match = re.match(r'^hakdomo0*(\d*)$', stem, re.IGNORECASE)
+    if hakdomo_match:
+        num_str = hakdomo_match.group(1)
+        if num_str:
+            number = int(num_str)
+            hebrew_gematria = number_to_hebrew_gematria(number)
+            return f"הקדמה {hebrew_gematria}"
+        else:
+            return 'הקדמה'
+    
+    # Pattern: perek followed by number (with optional leading zeros) and optional letter
+    perek_match = re.match(r'^perek0*(\d+)([a-z])?$', stem, re.IGNORECASE)
+    if perek_match:
+        number = int(perek_match.group(1))
+        letter = perek_match.group(2)
+        
+        # Convert number to Hebrew gematria
+        hebrew_gematria = number_to_hebrew_gematria(number)
+        
+        if letter:
+            # Convert letter to number (a=1, b=2, etc.)
+            letter_num = ord(letter.lower()) - ord('a') + 1
+            return f"פרק {hebrew_gematria} {letter_num}"
+        else:
+            return f"פרק {hebrew_gematria}"
+    
+    return None
+
+
 def extract_year(filename_stem):
     """
     Extract year from filename.
     Looks for Hebrew year pattern like תש״כ, תשכ_ז תשכח, תשנ״ט, etc.
     Years always start with תש (taf-shin) and are 3-4 characters long.
+    Returns None if no year found (year is optional).
     """
     stem = filename_stem.strip()
 
@@ -503,12 +892,17 @@ def reformat_docx(
     # Add document headings
     parshah_heading = parshah if skip_parshah_prefix else f"פרשת {parshah}"
 
-    for level, text in [
+    # Heading 4 is optional - only add if filename is provided
+    headings = [
         ("Heading 1", book),
         ("Heading 2", sefer),
         ("Heading 3", parshah_heading),
-        ("Heading 4", filename),
-    ]:
+    ]
+    
+    if filename:
+        headings.append(("Heading 4", filename))
+
+    for level, text in headings:
         if not text:
             continue
         p = new_doc.add_paragraph(text, style=level)
@@ -640,8 +1034,9 @@ def convert_to_json(
     current_date = datetime.now().strftime("%Y-%m-%d")
 
     # Create JSON structure
+    # Use filename (heading4) for book_name_he, fallback to title if not provided
     json_data = {
-        "book_name_he": title,
+        "book_name_he": filename if filename else title,
         "book_name_en": "",
         "book_metadata": {"date": current_date},
         "chunks": [],
@@ -732,7 +1127,7 @@ def main():
 
     # --- Top-level: combine all year docs per parshah into one doc ---
     def combine_parshah_docs(subdir, out_subdir, book, sefer, parshah, skip_parshah_prefix):
-        files = list(subdir.glob("*.docx")) + list(subdir.glob("*.doc"))
+        files = get_processable_files(subdir)
         if not files:
             return
         from docx import Document
@@ -740,28 +1135,32 @@ def main():
         configure_styles(combined_doc)
         for path in sorted(files):
             temp_docx = None
+            needs_cleanup = False
             try:
-                filename_stem = Path(path).stem
+                filename_stem = Path(path).stem if path.suffix else path.name
+                title = filename_stem.replace('-formatted', '')
+                
+                # Try to extract year, then heading4 info, then use title
                 year = extract_year(filename_stem)
-                if not year:
-                    continue
-                # Add headings for this year
+                heading4_info = extract_heading4_info(filename_stem)
+                heading4 = year or heading4_info or title
+                
+                # Add headings for this file
                 headings = [
                     ("Heading 1", book),
                     ("Heading 2", sefer),
                     ("Heading 3", parshah if skip_parshah_prefix else f"פרשת {parshah}"),
-                    ("Heading 4", filename_stem.replace('-formatted', '')),
+                    ("Heading 4", heading4),
                 ]
                 for level, text in headings:
                     if text:
                         p = combined_doc.add_paragraph(text, style=level)
                         p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
                         p.paragraph_format.right_to_left = True
-                # Convert .doc to .docx if needed
-                input_path = path
-                if path.suffix.lower() == ".doc":
-                    temp_docx = convert_doc_to_docx(path)
-                    input_path = temp_docx
+                # Convert to .docx if needed
+                input_path, needs_cleanup = convert_to_docx(path)
+                if needs_cleanup:
+                    temp_docx = input_path
                 # Copy paragraphs from source, skipping old headers
                 source = Document(input_path)
                 in_header_section = True
@@ -861,18 +1260,19 @@ def main():
             out_name = f"{input_stem.replace('-formatted', '')}-formatted.docx"
             out_path = out_dir / out_name
 
-        print(f"📚 Processing multi-parshah document: {docs_path.name}\n")
+        file_display_name = docs_path.name
+        print(f"📚 Processing multi-parshah document: {file_display_name}\n")
         print(f"   Book: {args.book}")
         print(f"   Sefer: {args.sefer}\n")
 
         temp_docx = None
+        needs_cleanup = False
         try:
-            input_path = docs_path
-            if docs_path.suffix.lower() == ".doc":
-                print("Converting .doc to .docx... ", end="")
-                temp_docx = convert_doc_to_docx(docs_path)
-                input_path = temp_docx
-                print("done\n")
+            # Convert to .docx format
+            input_path, needs_cleanup = convert_to_docx(docs_path)
+            if needs_cleanup:
+                temp_docx = input_path
+                print("Converting to .docx format... done\n")
 
             print("Processing... ", end="")
             if args.json:
@@ -942,7 +1342,7 @@ def main():
                 total_success += 1
                 continue
 
-            files = list(subdir.glob("*.docx")) + list(subdir.glob("*.doc"))
+            files = get_processable_files(subdir)
             if not files:
                 continue
 
@@ -950,25 +1350,32 @@ def main():
 
             for i, path in enumerate(files, 1):
                 temp_docx = None
+                needs_cleanup = False
                 try:
-                    filename_stem = Path(path).stem
+                    filename_stem = Path(path).stem if path.suffix else path.name
                     title = filename_stem.replace("-formatted", "")
+                    
+                    # Try to extract year, then heading4 info, then use title
                     year = extract_year(title)
-                    if not year:
-                        print(f"  [{i}/{len(files)}] ⚠️ Skipping {path.name}: cannot extract year")
-                        continue
+                    heading4_info = extract_heading4_info(title)
+                    
+                    # Determine heading 4 text (optional)
+                    heading4 = year or heading4_info or title
+                    
                     if args.json:
                         out_name = f"{filename_stem}.json"
                         out_path = out_subdir / out_name
                     else:
                         out_name = f"{filename_stem.replace('-formatted', '')}-formatted.docx"
                         out_path = out_subdir / out_name
-                    print(f"  [{i}/{len(files)}] {path.stem} → {out_path.name} ...", end=" ")
-                    input_path = path
-                    if path.suffix.lower() == ".doc":
-                        print("(converting .doc...) ", end="")
-                        temp_docx = convert_doc_to_docx(path)
-                        input_path = temp_docx
+                    
+                    file_display_name = path.stem if path.suffix else path.name
+                    print(f"  [{i}/{len(files)}] {file_display_name} → {out_path.name} ...", end=" ")
+                    
+                    # Convert to .docx format
+                    input_path, needs_cleanup = convert_to_docx(path)
+                    if needs_cleanup:
+                        temp_docx = input_path
                     if args.json:
                         convert_to_json(
                             input_path,
@@ -976,7 +1383,7 @@ def main():
                             args.book,
                             sefer,
                             title,
-                            year,
+                            heading4,
                             args.skip_parshah_prefix,
                         )
                     else:
@@ -986,7 +1393,7 @@ def main():
                             args.book,
                             sefer,
                             parshah,
-                            title,
+                            heading4,
                             args.skip_parshah_prefix,
                         )
                     print("✓ done")
@@ -1009,10 +1416,10 @@ def main():
         )
         return
 
-    # Collect both .doc and .docx files
-    files = list(docs_dir.glob("*.docx")) + list(docs_dir.glob("*.doc"))
+    # Collect processable files
+    files = get_processable_files(docs_dir)
     if not files:
-        print(f"No .doc or .docx files found in {docs_dir}")
+        print(f"No supported files (.doc, .docx, .idml, or DOS-encoded) found in {docs_dir}")
         return
 
     print(f"📚 Processing {len(files)} file(s)...\n")
@@ -1020,38 +1427,37 @@ def main():
     success_count = 0
     for i, path in enumerate(files, 1):
         temp_docx = None
+        needs_cleanup = False
         try:
-            # Extract year from ORIGINAL filename (before any conversion)
-            year = extract_year(Path(path).stem)
-            if not year:
-                print(f"[{i}/{len(files)}] ⚠️ Skipping {path.name}: cannot extract year")
-                continue
+            # Extract information from ORIGINAL filename (before any conversion)
+            filename_stem = Path(path).stem if path.suffix else path.name
+            title = filename_stem.replace("-formatted", "")
+            
+            # Try to extract year, then heading4 info, then use title
+            year = extract_year(filename_stem)
+            heading4_info = extract_heading4_info(filename_stem)
+            heading4 = year or heading4_info or title
 
             # Output filename based on format
             if args.json:
-                # Extract title from filename (remove -formatted if present)
-                filename_stem = Path(path).stem
-                title = filename_stem.replace("-formatted", "")
                 out_name = f"{filename_stem}.json"
                 out_path = out_dir / "json" / out_name
             else:
-                title = args.parshah
                 out_name = f"{filename_stem.replace('-formatted', '')}-formatted.docx"
                 out_path = out_dir / out_name
 
+            file_display_name = path.stem if path.suffix else path.name
             print(
-                f"[{i}/{len(files)}] Processing {path.stem} → {out_path.name} ...",
+                f"[{i}/{len(files)}] Processing {file_display_name} → {out_path.name} ...",
                 end=" ",
             )
 
-            # Convert .doc to .docx if needed
-            input_path = path
-            if path.suffix.lower() == ".doc":
-                print("(converting .doc...) ", end="")
-                temp_docx = convert_doc_to_docx(path)
-                input_path = temp_docx
+            # Convert to .docx format
+            input_path, needs_cleanup = convert_to_docx(path)
+            if needs_cleanup:
+                temp_docx = input_path
 
-            # Pass the title from filename
+            # Pass the heading4 info
             if args.json:
                 convert_to_json(
                     input_path,
@@ -1059,7 +1465,7 @@ def main():
                     args.book,
                     args.sefer,
                     title,
-                    year,
+                    heading4,
                     args.skip_parshah_prefix,
                 )
             else:
@@ -1068,8 +1474,8 @@ def main():
                     out_path,
                     args.book,
                     args.sefer,
-                    title,
-                    title,
+                    args.parshah,
+                    heading4,
                     args.skip_parshah_prefix,
                 )
             print("✓ done")

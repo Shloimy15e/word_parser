@@ -1,2 +1,5 @@
 /docs
 /output
+/backup_input
+/backup_output
+/__pycache__

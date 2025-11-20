@@ -4,11 +4,16 @@ A Python tool for reformatting Hebrew Torah documents (Word files) to a standard
 
 ## Features
 
-- **Automatic Formatting**: Converts Hebrew Word documents (.doc/.docx) to a standardized format with consistent headings and styles
+- **Multiple File Format Support**: Converts Hebrew documents from various formats:
+  - Microsoft Word (.docx)
+  - Legacy Word (.doc) - using Word COM automation
+  - Adobe InDesign Markup Language (.idml)
+  - DOS-encoded Hebrew text files (CP862 encoding, no extension)
+- **Smart File Selection**: Automatically selects the appropriate file type from each directory (priority: .docx > .doc > .idml > DOS)
+- **Automatic Formatting**: Converts documents to a standardized format with consistent headings and styles
 - **Smart Header Detection**: Intelligently identifies and removes old headers/metadata while preserving Torah content
 - **Folder Structure Processing**: Batch process entire directory structures organized by Sefer/Parshah
 - **Year Extraction**: Automatically extracts Hebrew year from filenames (e.g., תש״כ, תשע״ט)
-- **.doc Support**: Converts legacy .doc files to .docx using Word COM automation
 - **RTL Text Handling**: Proper right-to-left formatting for Hebrew text
 - **Formatting Preservation**: Maintains character formatting, spacing, and special elements like centered asterisks
 - **JSON Export**: Output structured JSON files with each paragraph as a chunk for API integration
@@ -18,13 +23,20 @@ A Python tool for reformatting Hebrew Torah documents (Word files) to a standard
 ### Requirements
 
 - Python 3.6+
-- Windows OS (for .doc file conversion)
+- Windows OS (required only for .doc file conversion via COM automation)
+- Microsoft Word (required only for .doc file conversion)
+
+**Note**: `.idml` and DOS-encoded file support works on all platforms without additional dependencies.
 
 ### Install Dependencies
 
 ```bash
 pip install python-docx pywin32
 ```
+
+**Dependencies:**
+- `python-docx` - For reading and writing .docx files
+- `pywin32` - For .doc file conversion (Windows only)
 
 ## Usage
 
@@ -158,9 +170,37 @@ The tool extracts Hebrew years from filenames using these patterns:
 
 ## File Support
 
-- **Input formats**: `.docx`, `.doc`
-- **Output format**: `.docx`
-- **.doc conversion**: Requires Microsoft Word installed (uses COM automation)
+### Input Formats
+
+The parser supports the following file formats:
+
+1. **Microsoft Word Documents**
+   - `.docx` - Modern Word format (direct support)
+   - `.doc` - Legacy Word format (requires Microsoft Word installed for COM automation)
+
+2. **Adobe InDesign Markup Language**
+   - `.idml` - InDesign XML-based format
+   - Extracts text content from Stories folder within the IDML archive
+
+3. **DOS-Encoded Hebrew Text Files**
+   - No file extension
+   - CP862 (Hebrew DOS) encoding
+   - Automatically detected by content analysis
+
+### File Selection Priority
+
+When processing directories, the parser automatically selects **only one file type** per directory, in this priority order:
+1. `.docx` files (highest priority)
+2. `.doc` files
+3. `.idml` files
+4. DOS-encoded files with no extension (lowest priority)
+
+This ensures consistent processing and avoids duplicate output from the same content in different formats.
+
+### Output Format
+
+- **Output format**: `.docx` (standardized Word document)
+- **Note**: All input formats are converted to .docx for processing
 
 ## Formatting Preservation
 
@@ -194,6 +234,34 @@ python main.py --book "ליקוטי שיחות" --docs "docs/מועדים" --out
 ```bash
 python main.py --book "ליקוטי שיחות" --docs "docs/סדר בראשית" --out "output" --json
 ```
+
+## File Format Processing
+
+### IDML Files (Adobe InDesign)
+
+IDML (InDesign Markup Language) files are ZIP archives containing XML files. The parser:
+1. Extracts the IDML archive
+2. Locates Story files (Stories/*.xml) containing text content
+3. Parses XML to extract all text elements
+4. Creates a temporary .docx file with the extracted text
+5. Processes the .docx file through the standard pipeline
+
+**Example:**
+```bash
+python main.py --book "ליקוטי שיחות" --docs "docs/סדר בראשית" --out "output"
+# Will automatically process any .idml files found
+```
+
+### DOS-Encoded Hebrew Files
+
+DOS-encoded files use the CP862 (Hebrew DOS) character encoding and typically have no file extension. The parser:
+1. Detects files without extensions
+2. Attempts to decode using CP862 encoding
+3. Validates Hebrew character content (must be >10% Hebrew characters)
+4. Converts to UTF-8 and creates a temporary .docx file
+5. Processes through the standard pipeline
+
+**Note**: DOS files are detected automatically - no special flags required.
 
 ## Output Formats
 
