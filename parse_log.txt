@@ -1,0 +1,33 @@
+Step 1: Finding main story (largest)...
+  Main story: ue38 (268682 bytes)
+
+Step 2: Mapping pages and frames from spreads...
+  Found page: יד
+  Found page: טו
+    Page marker: ביצה ד:
+  Found page: טז
+  Found page: יז
+    Page marker: ביצה ד:
+  Found page: יח
+  Found page: יט
+    Page marker: ביצה ז:
+  Found page: יא
+  Found page: כ
+    Page marker: ביצה יא: - יב.
+  Found page: יב
+  Found page: יג
+    Page marker: ביצה ב. ב:
+
+Step 3: Extracting main story content...
+  Extracted 48 paragraphs
+
+Step 4: Mapping paragraphs to pages...
+  Story appears on 6 pages
+
+Step 5: Creating output with page markers...
+
+Summary:
+  - Main story: ue38
+  - Total paragraphs: 48
+  - Pages with content: 6
+  - Page markers found: 5

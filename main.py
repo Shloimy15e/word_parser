@@ -314,50 +314,164 @@ def convert_dos_to_docx(dos_path):
     return Path(temp_docx.name)
 
 
-def extract_text_from_idml(idml_path):
+def extract_text_from_idml(idml_path, daf_mode=False):
     """
     Extract text content from an IDML (InDesign Markup Language) file.
     IDML is a ZIP archive containing XML files.
-    Returns a list of text content strings.
-    """
-    texts = []
     
+    Args:
+        idml_path: Path to the IDML file
+        daf_mode: If True, returns list of (page_name, paragraph) tuples with page markers
+                  If False, returns simple list of paragraph strings
+    
+    Returns:
+        If daf_mode=True: list of (page_name, paragraph_text) tuples
+        If daf_mode=False: list of paragraph strings
+    """
     try:
         with zipfile.ZipFile(idml_path, 'r') as zip_file:
-            # IDML files contain Stories folder with XML files containing text
+            # Find the main story (largest)
             story_files = [name for name in zip_file.namelist() if name.startswith('Stories/') and name.endswith('.xml')]
+            largest_story = None
+            max_size = 0
+            main_story_id = None
             
             for story_file in story_files:
-                with zip_file.open(story_file) as f:
+                info = zip_file.getinfo(story_file)
+                if info.file_size > max_size:
+                    max_size = info.file_size
+                    largest_story = story_file
+                    main_story_id = largest_story.split('_')[1].replace('.xml', '')
+            
+            if not largest_story:
+                return [] if not daf_mode else []
+            
+            # Extract paragraphs from main story
+            paragraphs = []
+            with zip_file.open(largest_story) as f:
+                tree = ET.parse(f)
+                root = tree.getroot()
+                
+                for para_elem in root.iter():
+                    tag_name = para_elem.tag.split('}')[-1] if '}' in para_elem.tag else para_elem.tag
+                    
+                    if tag_name == 'ParagraphStyleRange':
+                        para_text_parts = []
+                        for content_elem in para_elem.iter():
+                            content_tag = content_elem.tag.split('}')[-1] if '}' in content_elem.tag else content_elem.tag
+                            if content_tag == 'Content' and content_elem.text:
+                                para_text_parts.append(content_elem.text)
+                        
+                        if para_text_parts:
+                            para_text = ''.join(para_text_parts).strip()
+                            para_text = para_text.replace('&apos;', "'").replace('&quot;', '"')
+                            para_text = para_text.replace('\ufeff', '')
+                            para_text = ' '.join(para_text.split())
+                            
+                            if para_text and para_text != "0" and len(para_text) > 1:
+                                paragraphs.append(para_text)
+            
+            # If not in daf mode, return simple list
+            if not daf_mode:
+                return paragraphs
+            
+            # DAF MODE: Map paragraphs to pages
+            frame_to_page = {}
+            page_markers = {}
+            
+            # Parse spreads to find page mappings
+            spread_files = [name for name in zip_file.namelist() if name.startswith('Spreads/') and name.endswith('.xml')]
+            
+            for spread_file in sorted(spread_files):
+                with zip_file.open(spread_file) as f:
                     tree = ET.parse(f)
                     root = tree.getroot()
                     
-                    # Extract all text content from the XML
-                    # IDML uses various text elements, we'll get all text content
+                    current_page = None
                     for elem in root.iter():
-                        if elem.text and elem.text.strip():
-                            text = elem.text.strip()
-                            # Filter out standalone "0" or other noise characters
-                            if text != "0" and len(text) > 0:
-                                texts.append(text)
-                        if elem.tail and elem.tail.strip():
-                            tail = elem.tail.strip()
-                            # Filter out standalone "0" or other noise characters
-                            if tail != "0" and len(tail) > 0:
-                                texts.append(tail)
+                        tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+                        
+                        if tag == 'Page':
+                            current_page = elem.attrib.get('Name', 'Unknown')
+                        
+                        elif tag == 'TextFrame' and current_page:
+                            frame_id = elem.attrib.get('Self', '')
+                            parent_story = elem.attrib.get('ParentStory', '')
+                            
+                            if frame_id:
+                                frame_to_page[frame_id] = current_page
+                                
+                                # Check if this is a page marker (small story)
+                                if parent_story != main_story_id and parent_story:
+                                    try:
+                                        story_file = f'Stories/Story_{parent_story}.xml'
+                                        with zip_file.open(story_file) as sf:
+                                            story_tree = ET.parse(sf)
+                                            story_root = story_tree.getroot()
+                                            texts = []
+                                            for se in story_root.iter():
+                                                st = se.tag.split('}')[-1] if '}' in se.tag else se.tag
+                                                if st == 'Content' and se.text:
+                                                    texts.append(se.text.strip())
+                                            marker_text = ' '.join(texts).strip()
+                                            # Store page marker if it looks like a reference
+                                            if marker_text and ':' in marker_text and len(marker_text) < 50:
+                                                if current_page not in page_markers:
+                                                    page_markers[current_page] = marker_text
+                                    except:
+                                        pass
+            
+            # Get unique pages and sort by gematria value
+            unique_pages = set(frame_to_page.values())
+            pages_with_content = sorted(unique_pages, key=lambda p: hebrew_gematria_to_number(p))
+            
+            if not pages_with_content:
+                # Fallback: return paragraphs without page info
+                return [(None, p) for p in paragraphs]
+            
+            # Distribute paragraphs across pages (approximation)
+            paras_per_page = len(paragraphs) // len(pages_with_content) if pages_with_content else len(paragraphs)
+            
+            result = []
+            para_idx = 0
+            
+            for page_idx, page_name in enumerate(pages_with_content):
+                # Add page marker if exists
+                marker = page_markers.get(page_name, page_name)
+                result.append((page_name, f"PAGE_MARKER:{marker}"))
+                
+                # Add paragraphs for this page
+                end_idx = min(para_idx + paras_per_page, len(paragraphs))
+                if page_idx == len(pages_with_content) - 1:
+                    end_idx = len(paragraphs)  # Last page gets remaining
+                
+                for i in range(para_idx, end_idx):
+                    result.append((page_name, paragraphs[i]))
+                
+                para_idx = end_idx
+            
+            return result
+    
     except Exception as e:
         print(f"Warning: Error extracting text from IDML: {e}")
-    
-    return texts
+        import traceback
+        traceback.print_exc()
+        return [] if not daf_mode else []
 
 
-def convert_idml_to_docx(idml_path):
+def convert_idml_to_docx(idml_path, daf_mode=False):
     """
     Convert IDML file to .docx by extracting text content.
-    Returns path to temporary .docx file.
+    
+    Args:
+        idml_path: Path to IDML file
+        daf_mode: If True, uses page markers for Heading 3 (דף) and Heading 4 (עמוד)
+    
+    Returns:
+        Path to temporary .docx file
     """
     # Extract text from IDML
-    texts = extract_text_from_idml(idml_path)
+    texts = extract_text_from_idml(idml_path, daf_mode=daf_mode)
     
     if not texts:
         raise ValueError(f"No text content found in IDML file: {idml_path}")
@@ -365,12 +479,108 @@ def convert_idml_to_docx(idml_path):
     # Create a new document
     doc = Document()
     
-    # Add extracted text as paragraphs
-    for text in texts:
-        if text.strip():
-            p = doc.add_paragraph(text)
-            p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-            p.paragraph_format.right_to_left = True
+    if daf_mode:
+        # Process with page markers - collect items first, then add in correct order
+        current_daf = None
+        current_amud = None
+        pending_items = []  # List of (type, text, style) tuples
+        
+        def flush_pending():
+            """Add pending items to document, reordering separators before headings"""
+            if not pending_items:
+                return
+            
+            # Find separators that come right after headings
+            i = 0
+            while i < len(pending_items):
+                item_type, item_text, _ = pending_items[i]
+                
+                # If this is a separator and previous items are headings, move separator before them
+                if item_type == 'separator':
+                    # Look back to find where headings start
+                    heading_start = i
+                    for j in range(i - 1, -1, -1):
+                        if pending_items[j][0] in ['heading3', 'heading4']:
+                            heading_start = j
+                        else:
+                            break
+                    
+                    # If we found headings right before, move separator before them
+                    if heading_start < i:
+                        separator = pending_items.pop(i)
+                        pending_items.insert(heading_start, separator)
+                        i = heading_start + 1
+                        continue
+                
+                i += 1
+            
+            # Now add all items to document
+            for item_type, item_text, _ in pending_items:
+                if item_type == 'heading3':
+                    p = doc.add_paragraph(item_text, style="Heading 3")
+                    p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                    p.paragraph_format.right_to_left = True
+                elif item_type == 'heading4':
+                    p = doc.add_paragraph(item_text, style="Heading 4")
+                    p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                    p.paragraph_format.right_to_left = True
+                elif item_type == 'separator':
+                    p = doc.add_paragraph(item_text)
+                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                else:  # regular paragraph
+                    p = doc.add_paragraph(item_text)
+                    p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                    p.paragraph_format.right_to_left = True
+            
+            pending_items.clear()
+        
+        for page_name, text in texts:
+            if text.startswith("PAGE_MARKER:"):
+                # Parse the marker to extract daf/amud info
+                marker = text.replace("PAGE_MARKER:", "").strip()
+                
+                # Detect amud from punctuation: "." = amud 1, ":" = amud 2
+                if '.' in marker:
+                    amud = "א"
+                elif ':' in marker:
+                    amud = "ב"
+                else:
+                    amud = "א"  # Default to amud 1
+                
+                # Add heading for daf if changed
+                if page_name and page_name != current_daf:
+                    pending_items.append(('heading3', f"דף {page_name}", "Heading 3"))
+                    current_daf = page_name
+                    current_amud = None  # Reset amud when daf changes
+                
+                # Add heading for amud if changed
+                if amud != current_amud:
+                    pending_items.append(('heading4', f"עמוד {amud}", "Heading 4"))
+                    current_amud = amud
+            
+            elif text.strip():
+                # Skip "פרק" (chapter) headings in DAF mode
+                if text.strip().startswith("פרק"):
+                    continue
+                
+                # Check if this is a separator line (only asterisks and spaces)
+                cleaned_text = text.strip().replace(' ', '').replace('\u00a0', '')
+                is_separator = cleaned_text and all(c == '*' for c in cleaned_text)
+                
+                if is_separator:
+                    pending_items.append(('separator', text, None))
+                else:
+                    pending_items.append(('paragraph', text, None))
+        
+        # Flush any remaining items
+        flush_pending()
+    else:
+        # Simple mode: just add all text
+        for text in texts:
+            if text.strip():
+                p = doc.add_paragraph(text)
+                p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                p.paragraph_format.right_to_left = True
     
     # Save to temp file
     temp_docx = tempfile.NamedTemporaryFile(delete=False, suffix=".docx")
@@ -406,7 +616,7 @@ def get_processable_files(directory):
     return []
 
 
-def convert_to_docx(file_path):
+def convert_to_docx(file_path, daf_mode=False):
     """
     Convert any supported file format to .docx.
     Returns tuple: (path_to_docx, needs_cleanup)
@@ -426,7 +636,7 @@ def convert_to_docx(file_path):
     
     elif suffix == '.idml':
         # Convert .idml to .docx
-        temp_docx = convert_idml_to_docx(file_path)
+        temp_docx = convert_idml_to_docx(file_path, daf_mode=daf_mode)
         return temp_docx, True
     
     elif not suffix and is_dos_encoded_file(file_path):
@@ -441,6 +651,30 @@ def convert_to_docx(file_path):
 # ----------------------------------------
 # Core conversion: one docx → formatted docx
 # ----------------------------------------
+def hebrew_gematria_to_number(hebrew_str):
+    """
+    Convert Hebrew gematria notation to a number.
+    Examples: א → 1, ב → 2, י → 10, יא → 11, טו → 15, etc.
+    """
+    if not hebrew_str:
+        return 0
+    
+    # Hebrew letter values
+    values = {
+        'א': 1, 'ב': 2, 'ג': 3, 'ד': 4, 'ה': 5, 'ו': 6, 'ז': 7, 'ח': 8, 'ט': 9,
+        'י': 10, 'כ': 20, 'ך': 20, 'ל': 30, 'מ': 40, 'ם': 40, 'נ': 50, 'ן': 50,
+        'ס': 60, 'ע': 70, 'פ': 80, 'ף': 80, 'צ': 90, 'ץ': 90,
+        'ק': 100, 'ר': 200, 'ש': 300, 'ת': 400
+    }
+    
+    total = 0
+    for char in hebrew_str:
+        if char in values:
+            total += values[char]
+    
+    return total if total > 0 else 999999  # Unknown goes to end
+
+
 def number_to_hebrew_gematria(num):
     """
     Convert a number to Hebrew gematria notation.
@@ -947,8 +1181,12 @@ def reformat_docx(
         pf_source = para.paragraph_format
         pf_new = new_p.paragraph_format
 
-        # Preserve centered alignment for asterisks, force RTL right alignment for everything else
-        if para.alignment == WD_ALIGN_PARAGRAPH.CENTER:
+        # Check if this is a separator (only asterisks)
+        cleaned_text = txt.replace(' ', '').replace('\u00a0', '')
+        is_separator = cleaned_text and all(c == '*' for c in cleaned_text)
+        
+        # Center separators, preserve centered alignment, otherwise force RTL right alignment
+        if is_separator or para.alignment == WD_ALIGN_PARAGRAPH.CENTER:
             new_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         else:
             new_p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
@@ -1089,7 +1327,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Reformat Hebrew DOCX files to standardized schema."
     )
-    parser.add_argument("--book", required=True, help="Book title (Heading 1)")
+    parser.add_argument("--book", help="Book title (Heading 1). Optional in DAF mode when using folder structure.")
     parser.add_argument(
         "--sefer",
         help="Sefer/tractate title (Heading 2). If not provided, uses folder name.",
@@ -1124,15 +1362,27 @@ def main():
         action="store_true",
         help="Combine all year documents per parshah into one Word file with four headings per year.",
     )
+    parser.add_argument(
+        "--daf-mode",
+        action="store_true",
+        help="DAF mode: For IDML files, use page markers as Heading 3 (דף) and Heading 4 (עמוד).",
+    )
 
     # --- Top-level: combine all year docs per parshah into one doc ---
-    def combine_parshah_docs(subdir, out_subdir, book, sefer, parshah, skip_parshah_prefix):
+    def combine_parshah_docs(subdir, out_subdir, book, sefer, parshah, skip_parshah_prefix, daf_mode=False):
         files = get_processable_files(subdir)
         if not files:
             return
         from docx import Document
         combined_doc = Document()
         configure_styles(combined_doc)
+        
+        # Track previous heading values to only insert when they change
+        prev_book = None
+        prev_sefer = None
+        prev_parshah = None
+        prev_heading4 = None
+        
         for path in sorted(files):
             temp_docx = None
             needs_cleanup = False
@@ -1145,92 +1395,174 @@ def main():
                 heading4_info = extract_heading4_info(filename_stem)
                 heading4 = year or heading4_info or title
                 
-                # Add headings for this file
-                headings = [
-                    ("Heading 1", book),
-                    ("Heading 2", sefer),
-                    ("Heading 3", parshah if skip_parshah_prefix else f"פרשת {parshah}"),
-                    ("Heading 4", heading4),
-                ]
-                for level, text in headings:
-                    if text:
-                        p = combined_doc.add_paragraph(text, style=level)
-                        p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-                        p.paragraph_format.right_to_left = True
+                # Prepare heading values
+                current_parshah = parshah if skip_parshah_prefix else f"פרשת {parshah}"
+                
                 # Convert to .docx if needed
-                input_path, needs_cleanup = convert_to_docx(path)
+                input_path, needs_cleanup = convert_to_docx(path, daf_mode=daf_mode)
                 if needs_cleanup:
                     temp_docx = input_path
-                # Copy paragraphs from source, skipping old headers
+                
                 source = Document(input_path)
-                in_header_section = True
-                for para in source.paragraphs:
-                    full_text = para.text
-                    txt = full_text.strip()
-                    # If we're still in the header section
-                    if in_header_section:
-                        if txt and not is_old_header(txt):
-                            in_header_section = False
-                        elif txt and is_old_header(txt):
+                
+                # In DAF mode, add Book/Sefer as Heading 1/2, then copy דף/עמוד from content
+                if daf_mode:
+                    # Add Book and Sefer headings only when they change (or first file)
+                    if prev_book != book:
+                        p = combined_doc.add_paragraph(book, style="Heading 1")
+                        p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                        p.paragraph_format.right_to_left = True
+                        prev_book = book
+                    
+                    if prev_sefer != sefer:
+                        p = combined_doc.add_paragraph(sefer, style="Heading 2")
+                        p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                        p.paragraph_format.right_to_left = True
+                        prev_sefer = sefer
+                    
+                    # Copy all paragraphs including Heading 3 (דף) and Heading 4 (עמוד)
+                    for para in source.paragraphs:
+                        txt = para.text.strip()
+                        if not txt:  # Skip empty paragraphs
                             continue
-                        elif not txt:
-                            continue
+                        
+                        # Check if this is a separator (stars only)
+                        cleaned_text = txt.replace(' ', '').replace('\u00a0', '')
+                        is_separator = cleaned_text and all(c == '*' for c in cleaned_text)
+                        
+                        # Copy paragraph with its style
+                        if para.style.name.startswith('Heading'):
+                            new_p = combined_doc.add_paragraph(para.text, style=para.style.name)
+                            new_p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                            new_p.paragraph_format.right_to_left = True
+                        elif is_separator:
+                            # Separator should be centered
+                            new_p = combined_doc.add_paragraph(para.text)
+                            new_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
                         else:
+                            new_p = combined_doc.add_paragraph()
+                            for run in para.runs:
+                                new_r = new_p.add_run(run.text)
+                                if run.font.bold is not None:
+                                    new_r.font.bold = run.font.bold
+                                if run.font.italic is not None:
+                                    new_r.font.italic = run.font.italic
+                                if run.font.underline is not None:
+                                    new_r.font.underline = run.font.underline
+                            new_p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                            try:
+                                new_p.paragraph_format.right_to_left = True
+                            except:
+                                pass
+                else:
+                    # Non-DAF mode: Add standard headings only when they change
+                    if prev_book != book:
+                        p = combined_doc.add_paragraph(book, style="Heading 1")
+                        p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                        p.paragraph_format.right_to_left = True
+                        prev_book = book
+                    
+                    if prev_sefer != sefer:
+                        p = combined_doc.add_paragraph(sefer, style="Heading 2")
+                        p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                        p.paragraph_format.right_to_left = True
+                        prev_sefer = sefer
+                    
+                    if prev_parshah != current_parshah:
+                        p = combined_doc.add_paragraph(current_parshah, style="Heading 3")
+                        p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                        p.paragraph_format.right_to_left = True
+                        prev_parshah = current_parshah
+                    
+                    # Add Heading 4 only when it changes (or first file)
+                    if heading4 and prev_heading4 != heading4:
+                        p = combined_doc.add_paragraph(heading4, style="Heading 4")
+                        p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                        p.paragraph_format.right_to_left = True
+                        prev_heading4 = heading4
+                    
+                    # Copy paragraphs from source, skipping old headers
+                    in_header_section = True
+                    for para in source.paragraphs:
+                        full_text = para.text
+                        txt = full_text.strip()
+                        # If we're still in the header section
+                        if in_header_section:
+                            if txt and not is_old_header(txt):
+                                in_header_section = False
+                            elif txt and is_old_header(txt):
+                                continue
+                            elif not txt:
+                                continue
+                            else:
+                                continue
+                        # After header section started
+                        if txt and is_old_header(txt):
                             continue
-                    # After header section started
-                    if txt and is_old_header(txt):
-                        continue
-                    # Copy paragraph
-                    new_p = combined_doc.add_paragraph()
-                    pf_source = para.paragraph_format
-                    pf_new = new_p.paragraph_format
-                    if para.alignment:
-                        new_p.alignment = para.alignment
-                    else:
-                        new_p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-                    try:
-                        pf_new.right_to_left = True
-                    except:
-                        pass
-                    if pf_source.left_indent is not None:
-                        pf_new.left_indent = pf_source.left_indent
-                    if pf_source.right_indent is not None:
-                        pf_new.right_indent = pf_source.right_indent
-                    if pf_source.first_line_indent is not None:
-                        pf_new.first_line_indent = pf_source.first_line_indent
-                    pf_new.space_before = pf_source.space_before
-                    pf_new.space_after = pf_source.space_after
-                    pf_new.line_spacing = pf_source.line_spacing
-                    if pf_source.line_spacing_rule is not None:
-                        pf_new.line_spacing_rule = pf_source.line_spacing_rule
-                    for run in para.runs:
-                        new_r = new_p.add_run(run.text)
-                        if run.font.bold is not None:
-                            new_r.font.bold = run.font.bold
-                        if run.font.italic is not None:
-                            new_r.font.italic = run.font.italic
-                        if run.font.underline is not None:
-                            new_r.font.underline = run.font.underline
-                        if run.font.size is not None:
-                            new_r.font.size = run.font.size
-                        if run.font.name is not None:
-                            new_r.font.name = run.font.name
-                        if run.font.color.rgb is not None:
-                            new_r.font.color.rgb = run.font.color.rgb
-                # Add a blank line after each year
+                        # Copy paragraph
+                        new_p = combined_doc.add_paragraph()
+                        pf_source = para.paragraph_format
+                        pf_new = new_p.paragraph_format
+                        if para.alignment:
+                            new_p.alignment = para.alignment
+                        else:
+                            new_p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                        try:
+                            pf_new.right_to_left = True
+                        except:
+                            pass
+                        if pf_source.left_indent is not None:
+                            pf_new.left_indent = pf_source.left_indent
+                        if pf_source.right_indent is not None:
+                            pf_new.right_indent = pf_source.right_indent
+                        if pf_source.first_line_indent is not None:
+                            pf_new.first_line_indent = pf_source.first_line_indent
+                        pf_new.space_before = pf_source.space_before
+                        pf_new.space_after = pf_source.space_after
+                        pf_new.line_spacing = pf_source.line_spacing
+                        if pf_source.line_spacing_rule is not None:
+                            pf_new.line_spacing_rule = pf_source.line_spacing_rule
+                        for run in para.runs:
+                            new_r = new_p.add_run(run.text)
+                            if run.font.bold is not None:
+                                new_r.font.bold = run.font.bold
+                            if run.font.italic is not None:
+                                new_r.font.italic = run.font.italic
+                            if run.font.underline is not None:
+                                new_r.font.underline = run.font.underline
+                            if run.font.size is not None:
+                                new_r.font.size = run.font.size
+                            if run.font.name is not None:
+                                new_r.font.name = run.font.name
+                            if run.font.color.rgb is not None:
+                                new_r.font.color.rgb = run.font.color.rgb
+                
+                # Add a blank line after each file
                 combined_doc.add_paragraph()
             finally:
                 if temp_docx and temp_docx.exists():
                     temp_docx.unlink()
         # Save combined document
-        out_name = f"{parshah}-combined.docx"
+        # In DAF mode, use sefer name for combined file; in normal mode use parshah
+        if daf_mode:
+            out_name = f"{sefer}-combined.docx"
+        else:
+            out_name = f"{parshah}-combined.docx"
         out_path = out_subdir / out_name
         combined_doc.save(out_path)
-        print(f"  ✓ Combined {len(files)} year(s) into {out_path}")
+        print(f"  ✓ Combined {len(files)} file(s) into {out_path}")
     args = parser.parse_args()
 
     docs_path = Path(args.docs)
     out_dir = Path(args.out)
+
+    # Validate --book requirement
+    # In DAF mode with folder structure (no --sefer/--parshah), --book is optional (derived from folder)
+    # In all other cases, --book is required
+    if not args.book:
+        if not args.daf_mode or args.sefer or args.parshah:
+            print("Error: --book is required (except in DAF mode with folder structure)")
+            return
 
     # Multi-parshah mode: process a single file
     if args.multi_parshah:
@@ -1269,7 +1601,7 @@ def main():
         needs_cleanup = False
         try:
             # Convert to .docx format
-            input_path, needs_cleanup = convert_to_docx(docs_path)
+            input_path, needs_cleanup = convert_to_docx(docs_path, daf_mode=args.daf_mode)
             if needs_cleanup:
                 temp_docx = input_path
                 print("Converting to .docx format... done\n")
@@ -1313,8 +1645,18 @@ def main():
 
     # Check if using folder structure mode (no sefer/parshah specified)
     if not args.sefer and not args.parshah:
-        # Use folder name as sefer, subfolders as parshah
-        sefer = docs_dir.name
+        # In DAF mode: docs_dir is the collection (Heading 1), subdirs are masechet (Heading 2)
+        # In normal mode: docs_dir is sefer, subdirs are parshah
+        
+        if args.daf_mode:
+            # DAF mode: parent folder = Heading 1 (book), current folder = Heading 2 (masechet/sefer)
+            book = docs_dir.name  # e.g., "אגדות מהריט"
+            print(f"📚 Processing DAF mode structure: {book}\n")
+        else:
+            # Normal mode: folder = sefer, use --book argument
+            book = args.book
+            sefer = docs_dir.name
+            print(f"📚 Processing folder structure: {sefer}\n")
 
         # Get all subdirectories
         subdirs = [d for d in docs_dir.iterdir() if d.is_dir()]
@@ -1323,22 +1665,29 @@ def main():
             print(f"No subdirectories found in {docs_dir}")
             return
 
-        print(f"📚 Processing folder structure: {sefer}\n")
         total_success = 0
         total_files = 0
 
         for subdir in subdirs:
-            parshah = subdir.name
+            if args.daf_mode:
+                # In DAF mode: subdir is the masechet (Heading 2)
+                sefer = subdir.name  # e.g., "ביצה"
+                parshah = None  # Not used in DAF mode
+            else:
+                # In normal mode: subdir is the parshah (Heading 3)
+                parshah = subdir.name
+            
             # Create output subdirectory
             if args.json:
-                out_subdir = out_dir / "json" / sefer / parshah
+                out_subdir = out_dir / "json" / book / sefer if args.daf_mode else out_dir / "json" / sefer / parshah
             else:
-                out_subdir = out_dir / sefer / parshah
+                out_subdir = out_dir / book / sefer if args.daf_mode else out_dir / sefer / parshah
             out_subdir.mkdir(parents=True, exist_ok=True)
 
             if args.combine_parshah:
-                print(f"📂 Combining {parshah} ...")
-                combine_parshah_docs(subdir, out_subdir, args.book, sefer, parshah, args.skip_parshah_prefix)
+                display_name = sefer if args.daf_mode else parshah
+                print(f"📂 Combining {display_name} ...")
+                combine_parshah_docs(subdir, out_subdir, book, sefer, parshah, args.skip_parshah_prefix, daf_mode=args.daf_mode)
                 total_success += 1
                 continue
 
@@ -1346,7 +1695,8 @@ def main():
             if not files:
                 continue
 
-            print(f"📂 {parshah} ({len(files)} file(s))")
+            display_name = sefer if args.daf_mode else parshah
+            print(f"📂 {display_name} ({len(files)} file(s))")
 
             for i, path in enumerate(files, 1):
                 temp_docx = None
@@ -1373,14 +1723,20 @@ def main():
                     print(f"  [{i}/{len(files)}] {file_display_name} → {out_path.name} ...", end=" ")
                     
                     # Convert to .docx format
-                    input_path, needs_cleanup = convert_to_docx(path)
+                    input_path, needs_cleanup = convert_to_docx(path, daf_mode=args.daf_mode)
                     if needs_cleanup:
                         temp_docx = input_path
-                    if args.json:
+                    
+                    # In DAF mode with IDML files, skip reformatting (headings already correct)
+                    if args.daf_mode and path.suffix.lower() == '.idml':
+                        from docx import Document
+                        doc = Document(input_path)
+                        doc.save(out_path)
+                    elif args.json:
                         convert_to_json(
                             input_path,
                             out_path,
-                            args.book,
+                            book if args.daf_mode else args.book,
                             sefer,
                             title,
                             heading4,
@@ -1390,7 +1746,7 @@ def main():
                         reformat_docx(
                             input_path,
                             out_path,
-                            args.book,
+                            book if args.daf_mode else args.book,
                             sefer,
                             parshah,
                             heading4,
@@ -1453,12 +1809,18 @@ def main():
             )
 
             # Convert to .docx format
-            input_path, needs_cleanup = convert_to_docx(path)
+            input_path, needs_cleanup = convert_to_docx(path, daf_mode=args.daf_mode)
             if needs_cleanup:
                 temp_docx = input_path
 
+            # In DAF mode with IDML files, the conversion already added the correct headings
+            # So we just copy the converted file directly without reformatting
+            if args.daf_mode and path.suffix.lower() == '.idml':
+                from docx import Document
+                doc = Document(input_path)
+                doc.save(out_path)
             # Pass the heading4 info
-            if args.json:
+            elif args.json:
                 convert_to_json(
                     input_path,
                     out_path,
