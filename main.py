@@ -497,7 +497,7 @@ def extract_heading4_info(filename_stem):
     stem = filename_stem.strip().lower()
     
     # Check for MEKOROS/MKOROS with optional number
-    mekoros_match = re.match(r'^m?koros0*(\d*)$', stem, re.IGNORECASE)
+    mekoros_match = re.match(r'^me?koros0*(\d*)$', stem, re.IGNORECASE)
     if mekoros_match:
         num_str = mekoros_match.group(1)
         if num_str:
@@ -535,6 +535,62 @@ def extract_heading4_info(filename_stem):
             return f"פרק {hebrew_gematria}"
     
     return None
+
+
+def extract_daf_headings(filename_stem):
+    """
+    Extract both Heading 3 and Heading 4 from filename for daf mode.
+    Examples:
+      - "PEREK1A" → (H3: "פרק א", H4: "חלק א")
+      - "PEREK1" → (H3: "פרק א", H4: None)
+      - "MEKOROS2" → (H3: "מקורות ב", H4: None)
+      - "HAKDOMO1" → (H3: "הקדמה א", H4: None)
+    Returns tuple: (heading3, heading4)
+    """
+    stem = filename_stem.strip().lower()
+    
+    # Check for MEKOROS/MKOROS with optional number
+    mekoros_match = re.match(r'^me?koros0*(\d*)$', stem, re.IGNORECASE)
+    if mekoros_match:
+        num_str = mekoros_match.group(1)
+        if num_str:
+            number = int(num_str)
+            hebrew_gematria = number_to_hebrew_gematria(number)
+            return (f"מקורות {hebrew_gematria}", None)
+        else:
+            return ('מקורות', None)
+    
+    # Check for HAKDOMO with optional number
+    hakdomo_match = re.match(r'^hakdomo0*(\d*)$', stem, re.IGNORECASE)
+    if hakdomo_match:
+        num_str = hakdomo_match.group(1)
+        if num_str:
+            number = int(num_str)
+            hebrew_gematria = number_to_hebrew_gematria(number)
+            return (f"הקדמה {hebrew_gematria}", None)
+        else:
+            return ('הקדמה', None)
+    
+    # Pattern: perek followed by number (with optional leading zeros) and optional letter
+    perek_match = re.match(r'^perek0*(\d+)([a-z])?$', stem, re.IGNORECASE)
+    if perek_match:
+        number = int(perek_match.group(1))
+        letter = perek_match.group(2)
+        
+        # Convert number to Hebrew gematria
+        hebrew_gematria = number_to_hebrew_gematria(number)
+        heading3 = f"פרק {hebrew_gematria}"
+        
+        if letter:
+            # Convert letter to Hebrew "חלק" (section)
+            letter_gematria = number_to_hebrew_gematria(ord(letter.lower()) - ord('a') + 1)
+            heading4 = f"חלק {letter_gematria}"
+            return (heading3, heading4)
+        else:
+            return (heading3, None)
+    
+    # Fallback: use filename as-is for H3, no H4
+    return (filename_stem, None)
 
 
 def extract_year(filename_stem):
@@ -1082,6 +1138,227 @@ def convert_to_json(
         json.dump(json_data, f, ensure_ascii=False, indent=2)
 
 
+def reformat_docx_daf_mode(input_path, output_path, book, daf_folder, filename):
+    """
+    Reformat docx in daf mode with shifted heading hierarchy:
+    - Heading 1: book (parent folder or --book arg)
+    - Heading 2: daf_folder (folder name)
+    - Heading 3: extracted from filename (e.g., "פרק א")
+    - Heading 4: extracted from filename letter suffix (e.g., "חלק א") - optional
+    """
+    source = Document(input_path)
+    new_doc = Document()
+    configure_styles(new_doc)
+
+    # Extract headings 3 and 4 from filename
+    heading3, heading4 = extract_daf_headings(filename)
+
+    # Add document headings (3-4 levels in daf mode)
+    headings = [
+        ("Heading 1", book),
+        ("Heading 2", daf_folder),
+        ("Heading 3", heading3),
+    ]
+    
+    if heading4:
+        headings.append(("Heading 4", heading4))
+
+    for level, text in headings:
+        if not text:
+            continue
+        p = new_doc.add_paragraph(text, style=level)
+        p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        # Ensure RTL for Hebrew text
+        p.paragraph_format.right_to_left = True
+
+    # Process body text with smart header skipping
+    in_header_section = True
+
+    for para in source.paragraphs:
+        # Get the full paragraph text including ALL characters
+        full_text = para.text
+        txt = full_text.strip()
+
+        # If we're still in the header section
+        if in_header_section:
+            # Check if this looks like substantial content
+            if txt and should_start_content(txt):
+                in_header_section = False
+                # Fall through to copy this paragraph
+            # Skip if it's an old header
+            elif txt and is_old_header(txt):
+                continue
+            # Skip empty paragraphs in header section
+            elif not txt:
+                continue
+            else:
+                # Non-header, non-empty text in header section - shouldn't happen but be safe
+                continue
+
+        # After header section started
+        # Skip only matching old headers, preserve EVERYTHING else including empty paragraphs
+        if txt and is_old_header(txt):
+            continue
+
+        # Copy the entire paragraph element to preserve ALL formatting
+        # This includes empty paragraphs which create spacing
+        new_p = new_doc.add_paragraph()
+
+        # Copy paragraph-level formatting
+        pf_source = para.paragraph_format
+        pf_new = new_p.paragraph_format
+
+        # Preserve centered alignment for asterisks, force RTL right alignment for everything else
+        if para.alignment == WD_ALIGN_PARAGRAPH.CENTER:
+            new_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        else:
+            new_p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+
+        # Set RTL direction for Hebrew
+        pf_new.right_to_left = True
+
+        # Copy all paragraph format attributes
+        if pf_source.left_indent is not None:
+            pf_new.left_indent = pf_source.left_indent
+        if pf_source.right_indent is not None:
+            pf_new.right_indent = pf_source.right_indent
+        if pf_source.first_line_indent is not None:
+            pf_new.first_line_indent = pf_source.first_line_indent
+
+        # Always copy spacing - these are critical for layout
+        pf_new.space_before = pf_source.space_before
+        pf_new.space_after = pf_source.space_after
+        pf_new.line_spacing = pf_source.line_spacing
+        if pf_source.line_spacing_rule is not None:
+            pf_new.line_spacing_rule = pf_source.line_spacing_rule
+
+        # Copy keep together settings
+        if pf_source.keep_together is not None:
+            pf_new.keep_together = pf_source.keep_together
+        if pf_source.keep_with_next is not None:
+            pf_new.keep_with_next = pf_source.keep_with_next
+        if pf_source.page_break_before is not None:
+            pf_new.page_break_before = pf_source.page_break_before
+        if pf_source.widow_control is not None:
+            pf_new.widow_control = pf_source.widow_control
+
+        # Copy ALL runs including ones with just symbols/whitespace
+        for run in para.runs:
+            # Copy the run even if it's just whitespace or symbols
+            new_r = new_p.add_run(run.text)
+
+            # Copy all font properties
+            if run.font.bold is not None:
+                new_r.font.bold = run.font.bold
+            if run.font.italic is not None:
+                new_r.font.italic = run.font.italic
+            if run.font.underline is not None:
+                new_r.font.underline = run.font.underline
+            if run.font.size is not None:
+                new_r.font.size = run.font.size
+            if run.font.name is not None:
+                new_r.font.name = run.font.name
+            if run.font.color.rgb is not None:
+                new_r.font.color.rgb = run.font.color.rgb
+            if run.font.highlight_color is not None:
+                new_r.font.highlight_color = run.font.highlight_color
+            if run.font.all_caps is not None:
+                new_r.font.all_caps = run.font.all_caps
+            if run.font.small_caps is not None:
+                new_r.font.small_caps = run.font.small_caps
+            if run.font.strike is not None:
+                new_r.font.strike = run.font.strike
+            if run.font.superscript is not None:
+                new_r.font.superscript = run.font.superscript
+            if run.font.subscript is not None:
+                new_r.font.subscript = run.font.subscript
+
+        # Add a blank line after each paragraph with content
+        if txt:
+            new_doc.add_paragraph()
+
+    new_doc.save(output_path)
+
+
+def convert_to_json_daf_mode(input_path, output_path, book, daf_folder, filename):
+    """
+    Convert docx to JSON structure in daf mode.
+    Each paragraph becomes a chunk.
+    """
+    source = Document(input_path)
+
+    # Get current date
+    from datetime import datetime
+
+    current_date = datetime.now().strftime("%Y-%m-%d")
+    
+    # Extract headings 3 and 4 from filename
+    heading3, heading4 = extract_daf_headings(filename)
+
+    # Create chunk title from H3 and H4
+    if heading4:
+        chunk_title = f"{heading3} - {heading4}"
+    else:
+        chunk_title = heading3
+
+    # Create JSON structure
+    json_data = {
+        "book_name_he": daf_folder,  # H2 (folder name)
+        "book_name_en": "",
+        "book_metadata": {
+            "date": current_date, 
+            "book": book,  # H1
+            "section": heading3,  # H3
+        },
+        "chunks": [],
+    }
+    
+    # Add H4 if present
+    if heading4:
+        json_data["book_metadata"]["subsection"] = heading4
+
+    # Process body text with smart header skipping
+    in_header_section = True
+    chunk_id = 1
+
+    for para in source.paragraphs:
+        full_text = para.text
+        txt = full_text.strip()
+
+        # If we're still in the header section
+        if in_header_section:
+            # Check if this looks like substantial content
+            if txt and should_start_content(txt):
+                in_header_section = False
+                # Fall through to include this paragraph
+            # Skip if it's an old header
+            elif txt and is_old_header(txt):
+                continue
+            # Skip empty paragraphs in header section
+            elif not txt:
+                continue
+            else:
+                continue
+
+        # After header section, skip old headers but keep everything else
+        if txt and is_old_header(txt):
+            continue
+
+        # Only add non-empty paragraphs as chunks
+        if txt:
+            chunk = {
+                "chunk_id": chunk_id,
+                "chunk_metadata": {"chunk_title": chunk_title},  # H3 (+ H4 if present)
+                "text": txt,
+            }
+            json_data["chunks"].append(chunk)
+            chunk_id += 1
+
+    # Write JSON file
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(json_data, f, ensure_ascii=False, indent=2)
+
+
 # -------------------------------
 # Main CLI entry point
 # -------------------------------
@@ -1089,7 +1366,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Reformat Hebrew DOCX files to standardized schema."
     )
-    parser.add_argument("--book", required=True, help="Book title (Heading 1)")
+    parser.add_argument("--book", help="Book title (Heading 1). Required unless using --daf mode, where it's optional and overrides parent folder name.")
     parser.add_argument(
         "--sefer",
         help="Sefer/tractate title (Heading 2). If not provided, uses folder name.",
@@ -1122,8 +1399,151 @@ def main():
     parser.add_argument(
         "--combine-parshah",
         action="store_true",
-        help="Combine all year documents per parshah into one Word file with four headings per year.",
+        help="Combine all documents per folder into one Word file. In regular mode: combines years per parshah. In daf mode: combines all files per tractate folder.",
     )
+    parser.add_argument(
+        "--daf",
+        action="store_true",
+        help="Daf mode: Parent folder name → Heading 1, Folder name → Heading 2, File name → Heading 3. Book arg is optional and overrides parent folder name.",
+    )
+
+    # --- Combine all files per folder into one doc (daf mode) ---
+    def combine_daf_docs(folder_dir, out_subdir, book_name, folder_name):
+        files = get_processable_files(folder_dir)
+        if not files:
+            return
+        from docx import Document
+        combined_doc = Document()
+        configure_styles(combined_doc)
+        
+        # Track last headings to avoid repetition
+        last_headings = (None, None, None, None)  # (H1, H2, H3, H4)
+        
+        for path in sorted(files):
+            temp_docx = None
+            needs_cleanup = False
+            try:
+                filename_stem = Path(path).stem if path.suffix else path.name
+                title = filename_stem.replace('-formatted', '')
+                
+                # Extract headings 3 and 4 from filename
+                heading3, heading4 = extract_daf_headings(title)
+                
+                # Current headings tuple
+                current_headings = (book_name, folder_name, heading3, heading4)
+                
+                # Determine which headings to add based on what changed
+                headings_to_add = []
+                
+                # H1 and H2: only add if first file or if they changed
+                if last_headings == (None, None, None, None):
+                    # First file - add H1 and H2
+                    headings_to_add.append(("Heading 1", book_name))
+                    headings_to_add.append(("Heading 2", folder_name))
+                else:
+                    if current_headings[0] != last_headings[0]:
+                        headings_to_add.append(("Heading 1", book_name))
+                    if current_headings[1] != last_headings[1]:
+                        headings_to_add.append(("Heading 2", folder_name))
+                
+                # H3 (perek) and H4 (chelek) logic
+                perek_changed = current_headings[2] != last_headings[2]
+                chelek_changed = current_headings[3] != last_headings[3]
+                
+                if perek_changed or last_headings == (None, None, None, None):
+                    # Case 1: New perek (or first file) - always add H3
+                    headings_to_add.append(("Heading 3", heading3))
+                    # If this file has a chelek (H4), add it too
+                    if heading4:
+                        headings_to_add.append(("Heading 4", heading4))
+                else:
+                    # Case 2: Same perek as previous file
+                    # Only add H4 if it exists and has changed
+                    # This handles: PEREK1 (no H4) → PEREK1A (H4="א") → PEREK1B (H4="ב")
+                    if heading4 and chelek_changed:
+                        headings_to_add.append(("Heading 4", heading4))
+                
+                # Add the headings
+                for level, text in headings_to_add:
+                    if text:
+                        p = combined_doc.add_paragraph(text, style=level)
+                        p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                        p.paragraph_format.right_to_left = True
+                
+                # Update last headings
+                last_headings = current_headings
+                
+                # Convert to .docx if needed
+                input_path, needs_cleanup = convert_to_docx(path)
+                if needs_cleanup:
+                    temp_docx = input_path
+                
+                # Copy paragraphs from source, skipping old headers
+                source = Document(input_path)
+                in_header_section = True
+                for para in source.paragraphs:
+                    full_text = para.text
+                    txt = full_text.strip()
+                    # If we're still in the header section
+                    if in_header_section:
+                        if txt and not is_old_header(txt):
+                            in_header_section = False
+                        elif txt and is_old_header(txt):
+                            continue
+                        elif not txt:
+                            continue
+                        else:
+                            continue
+                    # After header section started
+                    if txt and is_old_header(txt):
+                        continue
+                    # Copy paragraph
+                    new_p = combined_doc.add_paragraph()
+                    pf_source = para.paragraph_format
+                    pf_new = new_p.paragraph_format
+                    if para.alignment:
+                        new_p.alignment = para.alignment
+                    else:
+                        new_p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                    try:
+                        pf_new.right_to_left = True
+                    except:
+                        pass
+                    if pf_source.left_indent is not None:
+                        pf_new.left_indent = pf_source.left_indent
+                    if pf_source.right_indent is not None:
+                        pf_new.right_indent = pf_source.right_indent
+                    if pf_source.first_line_indent is not None:
+                        pf_new.first_line_indent = pf_source.first_line_indent
+                    pf_new.space_before = pf_source.space_before
+                    pf_new.space_after = pf_source.space_after
+                    pf_new.line_spacing = pf_source.line_spacing
+                    if pf_source.line_spacing_rule is not None:
+                        pf_new.line_spacing_rule = pf_source.line_spacing_rule
+                    for run in para.runs:
+                        new_r = new_p.add_run(run.text)
+                        if run.font.bold is not None:
+                            new_r.font.bold = run.font.bold
+                        if run.font.italic is not None:
+                            new_r.font.italic = run.font.italic
+                        if run.font.underline is not None:
+                            new_r.font.underline = run.font.underline
+                        if run.font.size is not None:
+                            new_r.font.size = run.font.size
+                        if run.font.name is not None:
+                            new_r.font.name = run.font.name
+                        if run.font.color.rgb is not None:
+                            new_r.font.color.rgb = run.font.color.rgb
+                # Add a blank line after each file
+                combined_doc.add_paragraph()
+            finally:
+                if temp_docx and temp_docx.exists():
+                    temp_docx.unlink()
+        # Save combined document
+        out_name = f"{folder_name}-combined.docx"
+        out_path = out_subdir / out_name
+        combined_doc.save(out_path)
+        print(f"  ✓ Combined {len(files)} file(s) into {out_path}")
 
     # --- Top-level: combine all year docs per parshah into one doc ---
     def combine_parshah_docs(subdir, out_subdir, book, sefer, parshah, skip_parshah_prefix):
@@ -1133,6 +1553,10 @@ def main():
         from docx import Document
         combined_doc = Document()
         configure_styles(combined_doc)
+        
+        # Track last headings to avoid repetition
+        last_headings = (None, None, None, None)  # (H1, H2, H3, H4)
+        
         for path in sorted(files):
             temp_docx = None
             needs_cleanup = False
@@ -1145,18 +1569,52 @@ def main():
                 heading4_info = extract_heading4_info(filename_stem)
                 heading4 = year or heading4_info or title
                 
-                # Add headings for this file
-                headings = [
-                    ("Heading 1", book),
-                    ("Heading 2", sefer),
-                    ("Heading 3", parshah if skip_parshah_prefix else f"פרשת {parshah}"),
-                    ("Heading 4", heading4),
-                ]
-                for level, text in headings:
+                # Prepare heading values
+                heading3_text = parshah if skip_parshah_prefix else f"פרשת {parshah}"
+                
+                # Current headings tuple
+                current_headings = (book, sefer, heading3_text, heading4)
+                
+                # Determine which headings to add based on what changed
+                headings_to_add = []
+                
+                # H1, H2, and H3: only add if first file or if they changed
+                if last_headings == (None, None, None, None):
+                    # First file - add H1, H2, and H3
+                    headings_to_add.append(("Heading 1", book))
+                    headings_to_add.append(("Heading 2", sefer))
+                    headings_to_add.append(("Heading 3", heading3_text))
+                    # First file H4
+                    if heading4:
+                        headings_to_add.append(("Heading 4", heading4))
+                else:
+                    if current_headings[0] != last_headings[0]:
+                        headings_to_add.append(("Heading 1", book))
+                    if current_headings[1] != last_headings[1]:
+                        headings_to_add.append(("Heading 2", sefer))
+                    
+                    # H3 (parshah/section): add if changed
+                    section_changed = current_headings[2] != last_headings[2]
+                    if section_changed:
+                        headings_to_add.append(("Heading 3", heading3_text))
+                        # If section changed and there's an H4, add it too
+                        if heading4:
+                            headings_to_add.append(("Heading 4", heading4))
+                    else:
+                        # Section same, but check if H4 changed
+                        h4_changed = current_headings[3] != last_headings[3]
+                        if heading4 and h4_changed:
+                            headings_to_add.append(("Heading 4", heading4))
+                
+                # Add the headings
+                for level, text in headings_to_add:
                     if text:
                         p = combined_doc.add_paragraph(text, style=level)
                         p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
                         p.paragraph_format.right_to_left = True
+                
+                # Update last headings
+                last_headings = current_headings
                 # Convert to .docx if needed
                 input_path, needs_cleanup = convert_to_docx(path)
                 if needs_cleanup:
@@ -1229,6 +1687,10 @@ def main():
         print(f"  ✓ Combined {len(files)} year(s) into {out_path}")
     args = parser.parse_args()
 
+    # Validate --book is provided when not in daf mode
+    if not args.daf and not args.book:
+        parser.error("--book is required unless using --daf mode")
+
     docs_path = Path(args.docs)
     out_dir = Path(args.out)
 
@@ -1291,6 +1753,117 @@ def main():
         finally:
             if temp_docx and temp_docx.exists():
                 temp_docx.unlink()
+        return
+
+    # Daf mode: Parent folder → H1, Folder → H2, File parsed → H3 & H4
+    if args.daf:
+        docs_dir = docs_path
+        
+        if not docs_dir.exists():
+            print(f"Error: Input directory '{docs_dir}' does not exist")
+            return
+        
+        if not docs_dir.is_dir():
+            print(f"Error: '{docs_dir}' is not a directory")
+            return
+        
+        out_dir.mkdir(exist_ok=True)
+        
+        # Create json subdirectory if needed
+        if args.json:
+            (out_dir / "json").mkdir(exist_ok=True)
+        
+        # Heading 1: book arg if provided, otherwise parent folder name (docs_dir name)
+        book_name = args.book if args.book else docs_dir.name
+        
+        # Get all subdirectories (these are the tractate/folder level → Heading 2)
+        folder_dirs = [d for d in docs_dir.iterdir() if d.is_dir()]
+        
+        if not folder_dirs:
+            print(f"No subdirectories found in {docs_dir}")
+            return
+        
+        print(f"📚 Processing in daf mode")
+        print(f"   Book (H1): {book_name}\n")
+        total_success = 0
+        total_files = 0
+        
+        for folder_dir in folder_dirs:
+            # Heading 2: folder name
+            folder_name = folder_dir.name
+            
+            # Create output subdirectory - maintain input structure
+            if args.json:
+                out_subdir = out_dir / "json" / docs_dir.name / folder_name
+            else:
+                out_subdir = out_dir / docs_dir.name / folder_name
+            out_subdir.mkdir(parents=True, exist_ok=True)
+            
+            # Get files from this folder
+            files = get_processable_files(folder_dir)
+            if not files:
+                continue
+            
+            # Combine mode: combine all files in this folder into one document
+            if args.combine_parshah:
+                print(f"📂 Combining {folder_name} ...")
+                combine_daf_docs(folder_dir, out_subdir, book_name, folder_name)
+                total_success += 1
+                continue
+            
+            print(f"📂 {folder_name} ({len(files)} file(s))")
+            
+            for i, path in enumerate(files, 1):
+                temp_docx = None
+                needs_cleanup = False
+                try:
+                    filename_stem = Path(path).stem if path.suffix else path.name
+                    title = filename_stem.replace("-formatted", "")
+                    
+                    if args.json:
+                        out_name = f"{filename_stem}.json"
+                        out_path = out_subdir / out_name
+                    else:
+                        out_name = f"{filename_stem.replace('-formatted', '')}-formatted.docx"
+                        out_path = out_subdir / out_name
+                    
+                    file_display_name = path.stem if path.suffix else path.name
+                    print(f"  [{i}/{len(files)}] {file_display_name} → {out_path.name} ...", end=" ")
+                    
+                    # Convert to .docx format
+                    input_path, needs_cleanup = convert_to_docx(path)
+                    if needs_cleanup:
+                        temp_docx = input_path
+                    
+                    # Process the file with daf mode hierarchy
+                    if args.json:
+                        # For JSON, create a custom structure
+                        convert_to_json_daf_mode(
+                            input_path,
+                            out_path,
+                            book_name,
+                            folder_name,
+                            title,
+                        )
+                    else:
+                        reformat_docx_daf_mode(
+                            input_path,
+                            out_path,
+                            book_name,
+                            folder_name,
+                            title,
+                        )
+                    print("✓ done")
+                    total_success += 1
+                    total_files += 1
+                except Exception as e:
+                    print(f"⚠️ error: {e}")
+                    total_files += 1
+                finally:
+                    if temp_docx and temp_docx.exists():
+                        temp_docx.unlink()
+            print()
+        print(f"✅ All done. Successfully processed {total_success}/{total_files} file(s).")
         return
 
     # Regular mode: process directory
