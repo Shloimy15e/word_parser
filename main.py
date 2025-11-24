@@ -588,9 +588,21 @@ def extract_daf_headings(filename_stem):
             return (heading3, heading4)
         else:
             return (heading3, None)
+        
     
-    # Fallback: use filename as-is for H3, no H4
-    return (filename_stem, None)
+    # Fallback: match everything (always create a match object)
+    name_match = re.match(r'^(.*)$', stem, re.IGNORECASE)
+    if name_match:
+        base_name = name_match.group(1)
+        # Try to extract trailing letter for heading4 if present
+        number_match = re.match(r'^(.*?)(\d+)$', stem)
+        if number_match:
+            number = number_match.group(2)
+            number_gematria = number_to_hebrew_gematria(int(number))
+            heading4 = f"חלק {number_gematria}"
+            return (number_match.group(1), heading4)
+        # Always return the base name and None for heading4 if not found
+        return (base_name, None)
 
 
 def extract_year(filename_stem):
@@ -1089,14 +1101,24 @@ def convert_to_json(
 
     current_date = datetime.now().strftime("%Y-%m-%d")
 
+    # Create base chunk title from H3 only (title/parshah)
+    base_chunk_title = title
+
     # Create JSON structure
-    # Use filename (heading4) for book_name_he, fallback to title if not provided
     json_data = {
-        "book_name_he": filename if filename else title,
+        "book_name_he": sefer,  # H2 (sefer/folder)
         "book_name_en": "",
-        "book_metadata": {"date": current_date},
+        "book_metadata": {
+            "date": current_date,
+            "book": book,  # H1
+            "section": title,  # H3 (parshah/section)
+        },
         "chunks": [],
     }
+    
+    # Add H4 (filename) if different from title
+    if filename and filename != title:
+        json_data["book_metadata"]["subsection"] = filename
 
     # Process body text with smart header skipping
     in_header_section = True
@@ -1127,9 +1149,14 @@ def convert_to_json(
 
         # Only add non-empty paragraphs as chunks
         if txt:
-            chunk = {"chunk_id": chunk_id, "chunk_metadata": {
-                "chunk_title": f"Paragraph {chunk_id}"
-            }, "text": txt}
+            # Create unique chunk title by appending chunk_id
+            chunk_title = f"{base_chunk_title} {chunk_id}"
+            
+            chunk = {
+                "chunk_id": chunk_id,
+                "chunk_metadata": {"chunk_title": chunk_title},
+                "text": txt
+            }
             json_data["chunks"].append(chunk)
             chunk_id += 1
 
@@ -1295,11 +1322,11 @@ def convert_to_json_daf_mode(input_path, output_path, book, daf_folder, filename
     # Extract headings 3 and 4 from filename
     heading3, heading4 = extract_daf_headings(filename)
 
-    # Create chunk title from H3 and H4
+    # Create base chunk title from H3 and H4
     if heading4:
-        chunk_title = f"{heading3} - {heading4}"
+        base_chunk_title = f"{heading3} - {heading4}"
     else:
-        chunk_title = heading3
+        base_chunk_title = heading3
 
     # Create JSON structure
     json_data = {
@@ -1346,9 +1373,12 @@ def convert_to_json_daf_mode(input_path, output_path, book, daf_folder, filename
 
         # Only add non-empty paragraphs as chunks
         if txt:
+            # Create unique chunk title by appending chunk_id
+            chunk_title = f"{base_chunk_title} {chunk_id}"
+            
             chunk = {
                 "chunk_id": chunk_id,
-                "chunk_metadata": {"chunk_title": chunk_title},  # H3 (+ H4 if present)
+                "chunk_metadata": {"chunk_title": chunk_title},  # H3 (+ H4 if present) + number
                 "text": txt,
             }
             json_data["chunks"].append(chunk)

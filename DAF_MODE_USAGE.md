@@ -64,7 +64,7 @@ This creates JSON files with the metadata:
 - `book_metadata.book`: Heading 1 value
 - `book_metadata.section`: Heading 3 value (e.g., "פרק א")
 - `book_metadata.subsection`: Heading 4 value (if present, e.g., "חלק א")
-- `chunk_metadata.chunk_title`: Combined H3 + H4 (e.g., "פרק א - חלק א" or just "פרק א")
+- `chunk_metadata.chunk_title`: Combined H3 + H4 + incremental number for uniqueness (e.g., "פרק א - חלק א 1", "פרק א - חלק א 2", or "פרק א 1", "פרק א 2")
 
 ### Custom Output Directory
 
