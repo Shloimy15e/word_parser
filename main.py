@@ -753,7 +753,7 @@ def convert_multi_parshah_to_json(
     
     # Create JSON structure
     json_data = {
-        "book_name_he": book,
+        "book_name_he": sefer + " - " + book,
         "book_name_en": "",
         "book_metadata": {"date": current_date, "sefer": sefer},
         "chunks": [],  # Array of chunks, one per list item
@@ -1106,7 +1106,7 @@ def convert_to_json(
 
     # Create JSON structure
     json_data = {
-        "book_name_he": sefer,  # H2 (sefer/folder)
+        "book_name_he": book + " - " + sefer,  # H2 (sefer/folder)
         "book_name_en": "",
         "book_metadata": {
             "date": current_date,
@@ -1330,7 +1330,7 @@ def convert_to_json_daf_mode(input_path, output_path, book, daf_folder, filename
 
     # Create JSON structure
     json_data = {
-        "book_name_he": daf_folder,  # H2 (folder name)
+        "book_name_he": book + " - " + daf_folder,  # H2 (folder name)
         "book_name_en": "",
         "book_metadata": {
             "date": current_date, 
