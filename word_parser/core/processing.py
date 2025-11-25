@@ -539,6 +539,106 @@ def sanitize_xml_text(text: str) -> str:
     return "".join(c for c in text if is_valid_xml_char(c))
 
 
+# -------------------------------
+# Page marking detection and removal
+# -------------------------------
+def is_page_marking(text: str) -> bool:
+    """
+    Check if a paragraph is a page marking that should be removed.
+    
+    Page markings are:
+    1. ((xxx)) - Text in double parentheses (e.g., ((תקכב)), ((כב)))
+    2. #א or א# - Hebrew letter with # symbol
+    
+    Returns True if the text is a page marking.
+    """
+    txt = text.strip()
+    if not txt:
+        return False
+    
+    # Pattern 1: ((xxx)) - double parentheses
+    if re.match(r'^\(\(.+\)\)$', txt):
+        return True
+    
+    # Pattern 2: #א or א# - Hebrew letter with # (one or more letters)
+    if re.match(r'^#[א-ת]+$', txt) or re.match(r'^[א-ת]+#$', txt):
+        return True
+    
+    return False
+
+
+def remove_page_markings(doc):
+    """
+    Remove page markings from document and merge split paragraphs.
+    
+    Page markings like ((תקכב)) or #א that appear between content paragraphs
+    are removed, and the paragraphs above and below are merged into one.
+    
+    Args:
+        doc: The document to process (Document instance)
+        
+    Returns:
+        The document with page markings removed and paragraphs merged
+    """
+    if not doc.paragraphs:
+        return doc
+    
+    from word_parser.core.document import HeadingLevel
+    
+    new_paragraphs = []
+    i = 0
+    
+    while i < len(doc.paragraphs):
+        current_para = doc.paragraphs[i]
+        current_text = current_para.text.strip()
+        
+        # Check if current paragraph is a page marking
+        if is_page_marking(current_text):
+            # This is a page marking - check if we should merge paragraphs
+            has_prev = len(new_paragraphs) > 0
+            has_next = i + 1 < len(doc.paragraphs)
+            
+            if has_prev and has_next:
+                prev_para = new_paragraphs[-1]
+                next_para = doc.paragraphs[i + 1]
+                
+                # Only merge if both surrounding paragraphs are non-empty content (not headings)
+                prev_text = prev_para.text.strip()
+                next_text = next_para.text.strip()
+                
+                is_prev_content = (
+                    prev_text and 
+                    prev_para.heading_level == HeadingLevel.NORMAL and
+                    not is_page_marking(prev_text)
+                )
+                is_next_content = (
+                    next_text and 
+                    next_para.heading_level == HeadingLevel.NORMAL and
+                    not is_page_marking(next_text)
+                )
+                
+                if is_prev_content and is_next_content:
+                    # Merge: append next paragraph text to previous paragraph
+                    # Add a space between them to ensure proper word separation
+                    merged_text = prev_para.text.rstrip() + " " + next_para.text.lstrip()
+                    prev_para.text = merged_text
+                    
+                    # Skip the page marking and the next paragraph (already merged)
+                    i += 2
+                    continue
+            
+            # If we didn't merge, just skip the page marking
+            i += 1
+            continue
+        
+        # Normal paragraph - add to results
+        new_paragraphs.append(current_para)
+        i += 1
+    
+    doc.paragraphs = new_paragraphs
+    return doc
+
+
 def clean_dos_text(text: str) -> str:
     """
     Clean DOS text - remove ALL numbers, brackets, and formatting codes.

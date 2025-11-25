@@ -11,7 +11,7 @@ This module provides format handlers for common Hebrew document structures:
 import re
 from typing import Dict, Any, List
 
-from word_parser.core.document import Document, HeadingLevel
+from word_parser.core.document import Document
 from word_parser.core.formats import DocumentFormat, FormatRegistry
 from word_parser.core.processing import (
     is_old_header,
@@ -20,6 +20,7 @@ from word_parser.core.processing import (
     extract_heading4_info,
     extract_daf_headings,
     detect_parshah_boundary,
+    remove_page_markings,
 )
 
 
@@ -71,6 +72,9 @@ class StandardFormat(DocumentFormat):
         parshah = context.get('parshah', '')
         filename = context.get('filename', '')
         skip_prefix = context.get('skip_parshah_prefix', False)
+        
+        # Remove page markings and merge split paragraphs
+        doc = remove_page_markings(doc)
         
         # Try to extract year from filename if not provided
         if filename and not context.get('year'):
@@ -174,6 +178,9 @@ class DafFormat(DocumentFormat):
         folder = context.get('folder', '')
         filename = context.get('filename', '')
         
+        # Remove page markings and merge split paragraphs
+        doc = remove_page_markings(doc)
+        
         # Extract H3 and H4 from filename
         heading3, heading4 = extract_daf_headings(filename)
         
@@ -274,6 +281,9 @@ class MultiParshahFormat(DocumentFormat):
         book = context.get('book', '')
         sefer = context.get('sefer', '')
         
+        # Remove page markings and merge split paragraphs
+        doc = remove_page_markings(doc)
+        
         doc.set_headings(h1=book, h2=sefer)
         doc.metadata.extra['is_multi_parshah'] = True
         
@@ -296,7 +306,7 @@ class MultiParshahFormat(DocumentFormat):
             text = para.text.strip()
             
             # Check for parshah boundary
-            is_boundary, parshah_name, year = detect_parshah_boundary(text, prev_text)
+            is_boundary, parshah_name, _ = detect_parshah_boundary(text, prev_text)
             
             if is_boundary:
                 current_parshah = parshah_name
@@ -437,6 +447,9 @@ class LetterFormat(DocumentFormat):
         recipient = context.get('recipient')
         date = context.get('date')
         
+        # Remove page markings and merge split paragraphs
+        doc = remove_page_markings(doc)
+        
         # Try to extract recipient and date from document if not provided
         if not recipient or not date:
             extracted = self._extract_letter_info(doc)
@@ -530,6 +543,9 @@ class SimanFormat(DocumentFormat):
         siman = context.get('siman')
         seif = context.get('seif')
         filename = context.get('filename', '')
+        
+        # Remove page markings and merge split paragraphs
+        doc = remove_page_markings(doc)
         
         # Try to extract siman from filename
         if not siman and filename:
