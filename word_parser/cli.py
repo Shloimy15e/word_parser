@@ -1,0 +1,591 @@
+#!/usr/bin/env python3
+"""
+Word Parser - Reformat Hebrew DOCX files to standardized schema.
+
+This is the main CLI entry point. It uses the modular reader/writer/format architecture
+to support multiple input formats, output formats, and document schemas.
+
+To add new input formats:
+    See word_parser/readers/base.py for the InputReader interface.
+    
+To add new output formats:
+    See word_parser/writers/base.py for the OutputWriter interface.
+
+To add new document formats (schemas):
+    See word_parser/core/formats.py for the DocumentFormat interface.
+"""
+
+import argparse
+import traceback
+from pathlib import Path
+from typing import Optional
+
+# Import the modular components
+from word_parser.core.document import Document
+from word_parser.core.processing import (
+    is_old_header,
+    should_start_content,
+    extract_heading4_info,
+    extract_daf_headings,
+    extract_year,
+)
+from word_parser.core.formats import FormatRegistry
+from word_parser.readers import ReaderRegistry
+from word_parser.writers import WriterRegistry
+from word_parser.utils import get_processable_files, get_file_stem
+
+
+class DocumentProcessor:
+    """
+    Main document processing class.
+    
+    Handles reading documents, applying format-specific transformations, and writing output.
+    """
+    
+    def __init__(self, output_format: str = 'docx', document_format: Optional[str] = None):
+        """
+        Initialize processor.
+        
+        Args:
+            output_format: Output format name ('docx', 'json', etc.)
+            document_format: Document format/schema name ('standard', 'daf', 'siman', etc.)
+                           If None, auto-detection will be used.
+        """
+        self.output_format = output_format
+        self.document_format_name = document_format
+        
+        self.writer = WriterRegistry.get_writer(output_format)
+        if not self.writer:
+            available = ", ".join(WriterRegistry.get_supported_formats())
+            raise ValueError(
+                f"Unknown output format: {output_format}. "
+                f"Available formats: {available}"
+            )
+        
+        # Get document format handler if specified
+        self.format_handler = None
+        if document_format:
+            self.format_handler = FormatRegistry.get_format(document_format)
+            if not self.format_handler:
+                available = ", ".join(FormatRegistry.list_formats())
+                raise ValueError(
+                    f"Unknown document format: {document_format}. "
+                    f"Available formats: {available}"
+                )
+    
+    def _apply_format(self, doc: Document, context: dict) -> Document:
+        """
+        Apply document format processing.
+        
+        If a format was specified, uses that. Otherwise, auto-detects.
+        
+        Args:
+            doc: Input document
+            context: Processing context (headings, filename, etc.)
+            
+        Returns:
+            Processed document
+        """
+        handler = self.format_handler
+        
+        # Auto-detect if no format specified
+        if handler is None:
+            handler = FormatRegistry.detect_format(doc, context)
+            if handler:
+                print(f"  (auto-detected format: {handler.get_name()})", end=" ")
+        
+        # Apply format processing
+        if handler:
+            doc = handler.process(doc, context)
+        
+        return doc
+    
+    def process_file(
+        self, 
+        input_path: Path, 
+        output_path: Path,
+        book: str, 
+        sefer: str, 
+        parshah: str, 
+        filename: Optional[str] = None,
+        skip_parshah_prefix: bool = False
+    ) -> None:
+        """
+        Process a single file.
+        
+        Args:
+            input_path: Path to input file
+            output_path: Path for output file
+            book: Book title (H1)
+            sefer: Sefer/tractate title (H2)
+            parshah: Parshah name (H3)
+            filename: Optional filename info (H4)
+            skip_parshah_prefix: Don't add 'פרשת' prefix
+        """
+        # Get reader for input file
+        reader = ReaderRegistry.get_reader_for_file(input_path)
+        if not reader:
+            available = ", ".join(ReaderRegistry.get_supported_extensions()) or "none"
+            raise ValueError(
+                f"No reader found for: {input_path}. "
+                f"Supported extensions: {available}"
+            )
+        
+        # Read document
+        doc = reader.read(input_path)
+        
+        # Set headings
+        doc.set_headings(h1=book, h2=sefer, h3=parshah, h4=filename)
+        
+        # Build context for format processing
+        context = {
+            'book': book,
+            'sefer': sefer,
+            'parshah': parshah,
+            'filename': filename,
+            'input_path': str(input_path),
+            'skip_parshah_prefix': skip_parshah_prefix,
+        }
+        
+        # Apply document format processing
+        doc = self._apply_format(doc, context)
+        
+        # Write output
+        self.writer.write(
+            doc, 
+            output_path,
+            skip_parshah_prefix=skip_parshah_prefix
+        )
+    
+    def process_file_daf_mode(
+        self, 
+        input_path: Path, 
+        output_path: Path,
+        book: str, 
+        daf_folder: str, 
+        filename: str
+    ) -> None:
+        """
+        Process a single file in daf mode.
+        
+        Args:
+            input_path: Path to input file
+            output_path: Path for output file
+            book: Book title (H1)
+            daf_folder: Folder name (H2)
+            filename: Filename for H3/H4 extraction
+        """
+        # Get reader for input file
+        reader = ReaderRegistry.get_reader_for_file(input_path)
+        if not reader:
+            raise ValueError(f"No reader found for: {input_path}")
+        
+        # Read document
+        doc = reader.read(input_path)
+        
+        # Extract headings from filename
+        heading3, heading4 = extract_daf_headings(filename)
+        
+        # Set headings
+        doc.set_headings(h1=book, h2=daf_folder, h3=heading3, h4=heading4)
+        
+        # Build context for format processing
+        context = {
+            'book': book,
+            'daf_folder': daf_folder,
+            'filename': filename,
+            'input_path': str(input_path),
+            'daf_mode': True,
+        }
+        
+        # Apply document format processing (usually DafFormat in daf mode)
+        doc = self._apply_format(doc, context)
+        
+        # Write output
+        self.writer.write(doc, output_path)
+    
+    def get_output_extension(self) -> str:
+        """Get the file extension for the current output format."""
+        return self.writer.get_extension()
+
+
+def process_single_file(args, file_path: Path, out_dir: Path) -> None:
+    """Process a single file directly."""
+    output_format = 'json' if args.json else 'docx'
+    document_format = getattr(args, 'format', None)
+    processor = DocumentProcessor(output_format=output_format, document_format=document_format)
+    
+    # Extract info from filename
+    filename_stem = file_path.stem
+    title = filename_stem.replace("-formatted", "")
+    
+    # Determine headings
+    sefer = args.sefer or file_path.parent.name
+    parshah = args.parshah or title
+    
+    year = extract_year(filename_stem)
+    heading4_info = extract_heading4_info(filename_stem)
+    heading4 = year or heading4_info or title
+    
+    # Create output path
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ext = processor.get_output_extension()
+    
+    if args.json:
+        json_dir = out_dir / "json"
+        json_dir.mkdir(parents=True, exist_ok=True)
+        out_name = f"{filename_stem}.json"
+        out_path = json_dir / out_name
+    else:
+        out_name = f"{filename_stem.replace('-formatted', '')}-formatted{ext}"
+        out_path = out_dir / out_name
+    
+    print(f"📄 Processing single file: {file_path.name}")
+    print(f"   Book (H1): {args.book}")
+    print(f"   Sefer (H2): {sefer}")
+    print(f"   Section (H3): {parshah}")
+    if heading4 != title:
+        print(f"   Subsection (H4): {heading4}")
+    print()
+    
+    try:
+        print(f"   {file_path.name} → {out_path.name} ...", end=" ")
+        processor.process_file(
+            file_path, out_path,
+            args.book, sefer, parshah, heading4,
+            args.skip_parshah_prefix
+        )
+        print("✓ done")
+        print(f"\n✅ Output saved to: {out_path}")
+    except Exception as e:
+        print(f"⚠️ error: {e}")
+        traceback.print_exc()
+
+
+def process_folder_structure(args, docs_dir: Path, out_dir: Path) -> None:
+    """Process documents using folder structure mode."""
+    output_format = 'json' if args.json else 'docx'
+    document_format = getattr(args, 'format', None)
+    processor = DocumentProcessor(output_format=output_format, document_format=document_format)
+    
+    sefer = docs_dir.name
+    subdirs = [d for d in docs_dir.iterdir() if d.is_dir()]
+    
+    if not subdirs:
+        print(f"No subdirectories found in {docs_dir}")
+        return
+    
+    print(f"📚 Processing folder structure: {sefer}\n")
+    total_success = 0
+    total_files = 0
+    
+    for subdir in subdirs:
+        parshah = subdir.name
+        
+        # Create output subdirectory
+        if args.json:
+            out_subdir = out_dir / "json" / sefer / parshah
+        else:
+            out_subdir = out_dir / sefer / parshah
+        out_subdir.mkdir(parents=True, exist_ok=True)
+        
+        if args.combine_parshah:
+            print(f"📂 Combining {parshah} ...")
+            # combine_parshah_docs(subdir, out_subdir, args.book, sefer, parshah, args.skip_parshah_prefix)
+            print("  ⚠️ Combine mode not yet implemented in refactored version")
+            total_success += 1
+            continue
+        
+        files = get_processable_files(subdir)
+        if not files:
+            continue
+        
+        print(f"📂 {parshah} ({len(files)} file(s))")
+        
+        for i, path in enumerate(files, 1):
+            try:
+                filename_stem = get_file_stem(path)
+                title = filename_stem.replace("-formatted", "")
+                
+                # Try to extract year, then heading4 info, then use title
+                year = extract_year(title)
+                heading4_info = extract_heading4_info(title)
+                heading4 = year or heading4_info or title
+                
+                ext = processor.get_output_extension()
+                if args.json:
+                    out_name = f"{filename_stem}.json"
+                else:
+                    out_name = f"{filename_stem.replace('-formatted', '')}-formatted{ext}"
+                out_path = out_subdir / out_name
+                
+                file_display_name = path.stem if path.suffix else path.name
+                print(f"  [{i}/{len(files)}] {file_display_name} → {out_path.name} ...", end=" ")
+                
+                processor.process_file(
+                    path, out_path,
+                    args.book, sefer, parshah, heading4,
+                    args.skip_parshah_prefix
+                )
+                print("✓ done")
+                total_success += 1
+                total_files += 1
+            except Exception as e:
+                print(f"⚠️ error: {e}")
+                total_files += 1
+        print()
+    
+    print(f"✅ All done. Successfully processed {total_success}/{total_files} file(s).")
+
+
+def process_daf_mode(args, docs_dir: Path, out_dir: Path) -> None:
+    """Process documents in daf mode."""
+    output_format = 'json' if args.json else 'docx'
+    # In daf mode, default to 'daf' document format unless overridden
+    document_format = getattr(args, 'format', None) or 'daf'
+    processor = DocumentProcessor(output_format=output_format, document_format=document_format)
+    
+    # Heading 1: book arg if provided, otherwise parent folder name
+    book_name = args.book if args.book else docs_dir.name
+    
+    # Get all subdirectories
+    folder_dirs = [d for d in docs_dir.iterdir() if d.is_dir()]
+    
+    if not folder_dirs:
+        print(f"No subdirectories found in {docs_dir}")
+        return
+    
+    print(f"📚 Processing in daf mode")
+    print(f"   Book (H1): {book_name}\n")
+    total_success = 0
+    total_files = 0
+    
+    for folder_dir in folder_dirs:
+        folder_name = folder_dir.name
+        
+        # Create output subdirectory
+        if args.json:
+            out_subdir = out_dir / "json" / docs_dir.name / folder_name
+        else:
+            out_subdir = out_dir / docs_dir.name / folder_name
+        out_subdir.mkdir(parents=True, exist_ok=True)
+        
+        files = get_processable_files(folder_dir)
+        if not files:
+            continue
+        
+        if args.combine_parshah:
+            print(f"📂 Combining {folder_name} ...")
+            print("  ⚠️ Combine mode not yet implemented in refactored version")
+            total_success += 1
+            continue
+        
+        print(f"📂 {folder_name} ({len(files)} file(s))")
+        
+        for i, path in enumerate(files, 1):
+            try:
+                filename_stem = get_file_stem(path)
+                title = filename_stem.replace("-formatted", "")
+                
+                ext = processor.get_output_extension()
+                if args.json:
+                    out_name = f"{filename_stem}.json"
+                else:
+                    out_name = f"{filename_stem.replace('-formatted', '')}-formatted{ext}"
+                out_path = out_subdir / out_name
+                
+                file_display_name = path.stem if path.suffix else path.name
+                print(f"  [{i}/{len(files)}] {file_display_name} → {out_path.name} ...", end=" ")
+                
+                processor.process_file_daf_mode(
+                    path, out_path,
+                    book_name, folder_name, title
+                )
+                print("✓ done")
+                total_success += 1
+                total_files += 1
+            except Exception as e:
+                print(f"⚠️ error: {e}")
+                total_files += 1
+        print()
+    
+    print(f"✅ All done. Successfully processed {total_success}/{total_files} file(s).")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Reformat Hebrew DOCX files to standardized schema.",
+        epilog="""
+Supported input formats: .docx, .doc (requires Word), .idml, DOS-encoded Hebrew
+Supported output formats: docx, json
+
+To add new formats, see the word_parser.readers and word_parser.writers packages.
+        """
+    )
+    parser.add_argument(
+        "--book", 
+        help="Book title (Heading 1). Required unless using --daf mode."
+    )
+    parser.add_argument(
+        "--sefer",
+        help="Sefer/tractate title (Heading 2). If not provided, uses folder name.",
+    )
+    parser.add_argument(
+        "--parshah",
+        help="Parshah name (Heading 3). If not provided, uses subfolder names.",
+    )
+    parser.add_argument(
+        "--skip-parshah-prefix",
+        action="store_true",
+        help="Skip adding 'פרשת' prefix to parshah name in Heading 3",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output as JSON structure instead of formatted Word documents",
+    )
+    parser.add_argument(
+        "--docs",
+        default="docs",
+        help="Input folder containing files or subfolders (or single file for multi-parshah mode)",
+    )
+    parser.add_argument(
+        "--out", 
+        default="output", 
+        help="Output folder"
+    )
+    parser.add_argument(
+        "--multi-parshah",
+        action="store_true",
+        help="Process a single document containing multiple parshahs.",
+    )
+    parser.add_argument(
+        "--combine-parshah",
+        action="store_true",
+        help="Combine all documents per folder into one file.",
+    )
+    parser.add_argument(
+        "--daf",
+        action="store_true",
+        help="Daf mode: Parent folder → H1, Folder → H2, File name → H3/H4.",
+    )
+    parser.add_argument(
+        "--list-formats",
+        action="store_true",
+        help="List all supported input, output, and document formats.",
+    )
+    parser.add_argument(
+        "--format",
+        help="Document format/schema (e.g., standard, daf, siman, multi-parshah). Auto-detected if not specified.",
+    )
+
+    args = parser.parse_args()
+    
+    # Handle --list-formats
+    if args.list_formats:
+        print("Supported input formats (file types):")
+        for info in ReaderRegistry.list_readers():
+            exts = ", ".join(info['extensions']) if info['extensions'] else "(content-detected)"
+            print(f"  {info['name']}: {exts}")
+        print("\nSupported output formats:")
+        for info in WriterRegistry.list_writers():
+            print(f"  {info['format']}: {info['extension']}")
+        print("\nSupported document formats (schemas):")
+        for info in FormatRegistry.list_formats():
+            name = info['name']
+            # Get first line of description
+            desc = info['description'].strip().split('\n')[0] if info['description'] else ""
+            print(f"  {name}: {desc}")
+        return
+    
+    # Validate --book is provided when not in daf mode
+    if not args.daf and not args.book:
+        parser.error("--book is required unless using --daf mode")
+    
+    docs_path = Path(args.docs)
+    out_dir = Path(args.out)
+    
+    # Create output directory
+    out_dir.mkdir(exist_ok=True)
+    if args.json:
+        (out_dir / "json").mkdir(exist_ok=True)
+    
+    # Multi-parshah mode
+    if args.multi_parshah:
+        print("⚠️ Multi-parshah mode not yet implemented in refactored version")
+        return
+    
+    # Check input path
+    if not docs_path.exists():
+        print(f"Error: Input path '{docs_path}' does not exist")
+        return
+    
+    # Single file mode - process one file directly
+    if docs_path.is_file():
+        process_single_file(args, docs_path, out_dir)
+        return
+    
+    # Daf mode
+    if args.daf:
+        process_daf_mode(args, docs_path, out_dir)
+        return
+    
+    # Folder structure mode (default when no sefer/parshah specified)
+    if not args.sefer and not args.parshah:
+        process_folder_structure(args, docs_path, out_dir)
+        return
+    
+    # Original single folder mode
+    if not args.sefer or not args.parshah:
+        print("Error: Both --sefer and --parshah are required when not using folder structure mode")
+        return
+    
+    # Process single folder
+    output_format = 'json' if args.json else 'docx'
+    document_format = getattr(args, 'format', None)
+    processor = DocumentProcessor(output_format=output_format, document_format=document_format)
+    
+    files = get_processable_files(docs_path)
+    if not files:
+        print(f"No supported files found in {docs_path}")
+        return
+    
+    print(f"📚 Processing {len(files)} file(s)...\n")
+    
+    success_count = 0
+    for i, path in enumerate(files, 1):
+        try:
+            filename_stem = get_file_stem(path)
+            title = filename_stem.replace("-formatted", "")
+            
+            year = extract_year(filename_stem)
+            heading4_info = extract_heading4_info(filename_stem)
+            heading4 = year or heading4_info or title
+            
+            ext = processor.get_output_extension()
+            if args.json:
+                out_name = f"{filename_stem}.json"
+                out_path = out_dir / "json" / out_name
+            else:
+                out_name = f"{filename_stem.replace('-formatted', '')}-formatted{ext}"
+                out_path = out_dir / out_name
+            
+            file_display_name = path.stem if path.suffix else path.name
+            print(f"[{i}/{len(files)}] Processing {file_display_name} → {out_path.name} ...", end=" ")
+            
+            processor.process_file(
+                path, out_path,
+                args.book, args.sefer, args.parshah, heading4,
+                args.skip_parshah_prefix
+            )
+            print("✓ done")
+            success_count += 1
+        except Exception as e:
+            print(f"⚠️ error: {e}")
+            traceback.print_exc()
+    
+    print(f"\n✅ All done. Successfully processed {success_count}/{len(files)} file(s).")
+
+
+if __name__ == "__main__":
+    main()
