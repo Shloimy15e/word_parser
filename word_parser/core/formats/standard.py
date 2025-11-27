@@ -55,10 +55,13 @@ class StandardFormat(DocumentFormat):
             "filename": None,
             "skip_parshah_prefix": False,
             "filter_headers": True,
+            "use_filename_for_h4": False,  # If True, use clean filename instead of extracted year
         }
 
     def process(self, doc: Document, context: Dict[str, Any]) -> Document:
         """Process document with standard parshah structure."""
+        from pathlib import Path
+        
         book = context.get("book", "")
         sefer = context.get("sefer", "")
         parshah = context.get("parshah", "")
@@ -68,8 +71,13 @@ class StandardFormat(DocumentFormat):
         # Remove page markings and merge split paragraphs
         doc = remove_page_markings(doc)
 
-        # Try to extract year from filename if not provided
-        if filename and not context.get("year"):
+        # Determine H4: use filename directly if option is set, otherwise extract year
+        use_filename = context.get("use_filename_for_h4", False)
+        if use_filename:
+            # Use filename from context directly (already cleaned when option is set)
+            h4 = filename if filename else None
+        elif filename and not context.get("year"):
+            # Try to extract year from filename if not provided
             year = extract_year(filename)
             heading4_info = extract_heading4_info(filename)
             h4 = year or heading4_info or filename

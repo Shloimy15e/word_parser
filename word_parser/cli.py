@@ -107,7 +107,7 @@ class DocumentProcessor:
         if handler is None:
             handler = FormatRegistry.detect_format(doc, context)
             if handler:
-                print(f"  (auto-detected format: {handler.get_name()})", end=" ")
+                print(f"  (auto-detected format: {handler.get_format_name()})", end=" ")
 
         # Apply format processing
         if handler:
@@ -124,6 +124,7 @@ class DocumentProcessor:
         parshah: Optional[str] = None,
         filename: Optional[str] = None,
         skip_parshah_prefix: bool = False,
+        use_filename_for_h4: bool = False,
     ) -> None:
         """
         Process a single file.
@@ -160,6 +161,7 @@ class DocumentProcessor:
             "filename": filename,
             "input_path": str(input_path),
             "skip_parshah_prefix": skip_parshah_prefix,
+            "use_filename_for_h4": use_filename_for_h4,
             "special_heading": self.special_heading,
             "font_size_heading": self.font_size_heading,
         }
@@ -249,9 +251,13 @@ def process_single_file(args, file_path: Path, out_dir: Path) -> None:
     sefer = args.sefer if args.sefer else (file_path.parent.name if document_format != "formatted" else None)
     parshah = args.parshah if args.parshah else (title if document_format != "formatted" else None)
 
-    year = extract_year(filename_stem)
-    heading4_info = extract_heading4_info(filename_stem)
-    heading4 = year or heading4_info or title
+    # Determine heading4: use clean filename if option is set, otherwise extract year
+    if getattr(args, "use_filename_for_h4", False):
+        heading4 = title
+    else:
+        year = extract_year(filename_stem)
+        heading4_info = extract_heading4_info(filename_stem)
+        heading4 = year or heading4_info or title
 
     # Create output path
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -287,6 +293,7 @@ def process_single_file(args, file_path: Path, out_dir: Path) -> None:
             parshah,
             heading4,
             args.skip_parshah_prefix,
+            getattr(args, "use_filename_for_h4", False),
         )
         print("✓ done")
         print(f"\n✅ Output saved to: {out_path}")
@@ -312,7 +319,8 @@ def process_folder_structure(args, docs_dir: Path, out_dir: Path) -> None:
 
     # If no subdirectories but files exist, process files directly (for formats like perek-h3)
     if not subdirs:
-        files = get_processable_files(docs_dir)
+        # Process all file types for all formats
+        files = get_processable_files(docs_dir, all_types=True)
         if files:
             print(f"📚 Processing folder: {sefer} (no subdirectories, processing files directly)\n")
             # Create output directory
@@ -328,10 +336,13 @@ def process_folder_structure(args, docs_dir: Path, out_dir: Path) -> None:
                     filename_stem = get_file_stem(path)
                     title = filename_stem.replace("-formatted", "")
                     
-                    # Try to extract year, then heading4 info, then use title
-                    year = extract_year(title)
-                    heading4_info = extract_heading4_info(title)
-                    heading4 = year or heading4_info or title
+                    # Determine heading4: use clean filename if option is set, otherwise extract year
+                    if getattr(args, "use_filename_for_h4", False):
+                        heading4 = title
+                    else:
+                        year = extract_year(title)
+                        heading4_info = extract_heading4_info(title)
+                        heading4 = year or heading4_info or title
                     
                     ext = processor.get_output_extension()
                     if args.json:
@@ -354,6 +365,7 @@ def process_folder_structure(args, docs_dir: Path, out_dir: Path) -> None:
                         None,  # No parshah for perek-h3 format
                         heading4,
                         args.skip_parshah_prefix,
+                        getattr(args, "use_filename_for_h4", False),
                     )
                     print("✓ done")
                     total_success += 1
@@ -400,7 +412,8 @@ def process_folder_structure(args, docs_dir: Path, out_dir: Path) -> None:
                 traceback.print_exc()
             continue
 
-        files = get_processable_files(subdir)
+        # Process all file types for all formats
+        files = get_processable_files(subdir, all_types=True)
         if not files:
             continue
 
@@ -411,10 +424,13 @@ def process_folder_structure(args, docs_dir: Path, out_dir: Path) -> None:
                 filename_stem = get_file_stem(path)
                 title = filename_stem.replace("-formatted", "")
 
-                # Try to extract year, then heading4 info, then use title
-                year = extract_year(title)
-                heading4_info = extract_heading4_info(title)
-                heading4 = year or heading4_info or title
+                # Determine heading4: use clean filename if option is set, otherwise extract year
+                if getattr(args, "use_filename_for_h4", False):
+                    heading4 = title
+                else:
+                    year = extract_year(title)
+                    heading4_info = extract_heading4_info(title)
+                    heading4 = year or heading4_info or title
 
                 ext = processor.get_output_extension()
                 if args.json:
@@ -439,6 +455,7 @@ def process_folder_structure(args, docs_dir: Path, out_dir: Path) -> None:
                     parshah,
                     heading4,
                     args.skip_parshah_prefix,
+                    getattr(args, "use_filename_for_h4", False),
                 )
                 print("✓ done")
                 total_success += 1
@@ -905,6 +922,11 @@ To add new formats, see the word_parser.readers and word_parser.writers packages
         help="Skip adding 'פרשת' prefix to parshah name in Heading 3",
     )
     parser.add_argument(
+        "--use-filename-for-h4",
+        action="store_true",
+        help="Use clean filename for H4 instead of extracting year (standard format only)",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Output as JSON structure instead of formatted Word documents",
@@ -1066,9 +1088,13 @@ To add new formats, see the word_parser.readers and word_parser.writers packages
             filename_stem = get_file_stem(path)
             title = filename_stem.replace("-formatted", "")
 
-            year = extract_year(filename_stem)
-            heading4_info = extract_heading4_info(filename_stem)
-            heading4 = year or heading4_info or title
+            # Determine heading4: use clean filename if option is set, otherwise extract year
+            if getattr(args, "use_filename_for_h4", False):
+                heading4 = title
+            else:
+                year = extract_year(filename_stem)
+                heading4_info = extract_heading4_info(filename_stem)
+                heading4 = year or heading4_info or title
 
             ext = processor.get_output_extension()
             if args.json:
@@ -1092,6 +1118,7 @@ To add new formats, see the word_parser.readers and word_parser.writers packages
                 args.parshah,
                 heading4,
                 args.skip_parshah_prefix,
+                getattr(args, "use_filename_for_h4", False),
             )
             print("✓ done")
             success_count += 1

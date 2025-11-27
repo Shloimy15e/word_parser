@@ -8,11 +8,18 @@ from typing import List, Optional
 from word_parser.readers.base import ReaderRegistry
 
 
-def get_processable_files(directory: Path) -> List[Path]:
+def get_processable_files(directory: Path, all_types: bool = False) -> List[Path]:
     """
     Get files to process from a directory.
     Priority order: .docx > .doc > .rtf > .idml > DOS-encoded (no extension)
-    Returns only files of ONE type (the highest priority type found).
+    
+    Args:
+        directory: Directory to search for files
+        all_types: If True, returns all supported file types. If False (default),
+                   returns only files of ONE type (the highest priority type found).
+    
+    Returns:
+        List of file paths to process
     """
     from word_parser.readers.dos_reader import DosReader
     
@@ -29,7 +36,14 @@ def get_processable_files(directory: Path) -> List[Path]:
         if file.is_file() and not file.suffix and DosReader.supports_file(file):
             files_by_type['dos'].append(file)
     
-    # Return files in priority order
+    # If all_types is True, return all files from all types
+    if all_types:
+        all_files = []
+        for file_type in ['docx', 'doc', 'rtf', 'idml', 'dos']:
+            all_files.extend(files_by_type[file_type])
+        return all_files
+    
+    # Return files in priority order (only one type)
     for file_type in ['docx', 'doc', 'rtf', 'idml', 'dos']:
         if files_by_type[file_type]:
             return files_by_type[file_type]
