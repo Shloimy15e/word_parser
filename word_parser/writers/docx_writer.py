@@ -55,6 +55,12 @@ class DocxWriter(OutputWriter):
         # Process body paragraphs
         self._add_body_paragraphs(new_doc, doc, opts)
 
+        # Add footnotes
+        print(f"Debug: Document has {len(doc.footnotes)} footnotes")
+        if doc.footnotes:
+            print(f"Debug: Adding footnotes to output document...")
+            self._add_footnotes(new_doc, doc)
+
         # Save
         output_path.parent.mkdir(parents=True, exist_ok=True)
         new_doc.save(str(output_path))
@@ -203,7 +209,16 @@ class DocxWriter(OutputWriter):
                 continue
 
             # Create new paragraph
-            new_p = docx_doc.add_paragraph()
+            # If it's a list item, preserve the list style
+            if para.is_list_item() and para.style_name:
+                # Try to use the original list style if it exists
+                try:
+                    new_p = docx_doc.add_paragraph(style=para.style_name)
+                except Exception:
+                    # If style doesn't exist, create regular paragraph
+                    new_p = docx_doc.add_paragraph()
+            else:
+                new_p = docx_doc.add_paragraph()
 
             # Set alignment
             if para.format.alignment == Alignment.CENTER:
@@ -241,7 +256,7 @@ class DocxWriter(OutputWriter):
             if para.format.widow_control is not None:
                 pf.widow_control = para.format.widow_control
 
-            # Copy runs
+            # Copy runs and add footnote references
             for run in para.runs:
                 new_r = new_p.add_run(run.text)
 
@@ -267,7 +282,173 @@ class DocxWriter(OutputWriter):
                     new_r.font.superscript = run.style.superscript
                 if run.style.subscript is not None:
                     new_r.font.subscript = run.style.subscript
+                
+                # Add footnote reference if present
+                if run.footnote_id is not None:
+                    footnote = doc.get_footnote_by_id(run.footnote_id)
+                    if footnote and footnote.original_id is not None:
+                        # Add footnote reference using XML manipulation
+                        self._add_footnote_reference(new_r, footnote.original_id)
 
             # Add blank line after non-empty paragraphs
             if add_blank_lines and txt:
                 docx_doc.add_paragraph()
+    
+    def _add_footnote_reference(self, run, footnote_id: int) -> None:
+        """Add a footnote reference to a run."""
+        try:
+            from docx.oxml import parse_xml
+            from docx.oxml.ns import qn
+            
+            # Create footnote reference element
+            footnote_ref_xml = f'<w:footnoteReference xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" w:id="{footnote_id}"/>'
+            footnote_ref = parse_xml(footnote_ref_xml)
+            
+            # Insert the footnote reference into the run
+            run._element.append(footnote_ref)
+        except Exception as e:
+            # If footnote reference addition fails, continue without it
+            print(f"Warning: Could not add footnote reference: {e}")
+            pass
+    
+    def _add_footnotes(self, docx_doc: DocxDocument, doc: Document) -> None:
+        """Add footnotes to the document."""
+        try:
+            from docx.oxml import parse_xml, OxmlElement
+            from docx.oxml.ns import qn
+            
+            FOOTNOTES_REL_TYPE = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes'
+            
+            # Get or create footnotes part
+            footnotes_part = None
+            footnotes_xml = None
+            
+            try:
+                # Try to get existing footnotes part
+                footnotes_rel = docx_doc.part.rels.get_by_reltype(FOOTNOTES_REL_TYPE)
+                if footnotes_rel:
+                    footnotes_part = footnotes_rel.target_part
+                    # Get the element directly from the part
+                    try:
+                        footnotes_xml = footnotes_part._element
+                    except AttributeError:
+                        # If _element doesn't exist, parse from blob and set it
+                        try:
+                            footnotes_xml = parse_xml(footnotes_part.blob)
+                            footnotes_part._element = footnotes_xml
+                        except Exception:
+                            # If we can't get the element, we'll create a new part
+                            footnotes_part = None
+                            footnotes_xml = None
+            except (AttributeError, KeyError):
+                pass
+            
+            # Create footnotes part if it doesn't exist
+            if footnotes_part is None or footnotes_xml is None:
+                print("Debug: Creating footnotes_part...")
+                # Create footnotes XML structure with required separator footnotes
+                # Word requires separator and continuationSeparator footnotes
+                footnotes_xml = parse_xml(
+                    '<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                    '<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>'
+                    '<w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>'
+                    '</w:footnotes>'
+                )
+                
+                # Get the package
+                package = docx_doc.part.package
+                from docx.opc.constants import CONTENT_TYPE as CT
+                from docx.opc.part import Part
+                from docx.opc.packuri import PackURI
+                
+                # Create partname for footnotes
+                partname = PackURI('/word/footnotes.xml')
+                
+                # Serialize the XML to bytes using lxml (python-docx uses lxml internally)
+                # parse_xml returns an lxml element, so we must use lxml's tostring
+                from lxml import etree as ET
+                xml_bytes = ET.tostring(footnotes_xml, encoding='utf-8', xml_declaration=True, pretty_print=False)
+                
+                # Create new part using the package's method
+                # The Part constructor will handle adding it to the package
+                footnotes_part = Part(partname, CT.WML_FOOTNOTES, xml_bytes, package)
+                
+                # Add relationship
+                docx_doc.part.relate_to(footnotes_part, FOOTNOTES_REL_TYPE)
+                
+                # Get the element from the part - try accessing via _element or parse blob
+                try:
+                    footnotes_xml = footnotes_part._element
+                except AttributeError:
+                    # Parse the blob to get the element
+                    footnotes_xml = parse_xml(footnotes_part.blob)
+                    # Set it as the part's element so modifications persist
+                    footnotes_part._element = footnotes_xml
+            
+            print(f"Debug: Footnotes XML element: {footnotes_xml}, type: {type(footnotes_xml)}")
+            
+            # Add each footnote
+            for footnote in doc.footnotes:
+                if not footnote.paragraphs:
+                    print(f"Debug: Skipping footnote {footnote.id} - no paragraphs")
+                    continue
+                
+                footnote_id = footnote.original_id or footnote.id
+                
+                # Use OxmlElement for proper namespace handling
+                footnote_elem = OxmlElement('w:footnote')
+                footnote_elem.set(qn('w:id'), str(footnote_id))
+                
+                # Add paragraphs to footnote
+                for para in footnote.paragraphs:
+                    para_elem = OxmlElement('w:p')
+                    
+                    # Add runs to paragraph
+                    for run in para.runs:
+                        run_elem = OxmlElement('w:r')
+                        
+                        # Add text element
+                        text_elem = OxmlElement('w:t')
+                        # Set preserve space attribute
+                        text_elem.set(qn('xml:space'), 'preserve')
+                        # Set text content (lxml will handle XML escaping automatically)
+                        if run.text:
+                            text_elem.text = run.text
+                        run_elem.append(text_elem)
+                        para_elem.append(run_elem)
+                    
+                    footnote_elem.append(para_elem)
+                
+                # Check if footnote with this ID already exists (avoid duplicates)
+                NS_W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+                existing_footnotes = footnotes_xml.findall(f'.//{{{NS_W}}}footnote')
+                existing_ids = [fn.get(f'{{{NS_W}}}id') for fn in existing_footnotes if fn.get(f'{{{NS_W}}}id')]
+                if str(footnote_id) not in existing_ids:
+                    # Append footnote to footnotes XML (after separator footnotes if they exist)
+                    footnotes_xml.append(footnote_elem)
+                else:
+                    print(f"Debug: Footnote {footnote_id} already exists, skipping")
+            
+            # Ensure the part's element is set to our modified XML and properly serialized
+            if footnotes_part is not None:
+                # Set the part's element to our modified XML
+                footnotes_part._element = footnotes_xml
+                
+                # Serialize the XML properly using lxml (which python-docx uses internally)
+                # parse_xml returns an lxml element, so we must use lxml's tostring
+                from lxml import etree as ET
+                xml_bytes = ET.tostring(
+                    footnotes_xml,
+                    encoding='utf-8',
+                    xml_declaration=True,
+                    pretty_print=False
+                )
+                object.__setattr__(footnotes_part, '_blob', xml_bytes)
+            
+            print(f"Debug: Finished adding {len(doc.footnotes)} footnotes to document")
+                
+        except Exception as e:
+            # If footnote addition fails, continue without footnotes
+            import traceback
+            print(f"Warning: Could not add footnotes: {e}")
+            traceback.print_exc()

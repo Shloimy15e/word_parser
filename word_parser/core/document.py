@@ -5,6 +5,9 @@ This module provides a format-agnostic representation of documents that can be
 created from any input format and written to any output format.
 """
 
+from __future__ import annotations
+
+import re
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import List, Optional, Dict, Any
@@ -49,6 +52,7 @@ class TextRun:
     """A run of text with consistent formatting within a paragraph."""
     text: str
     style: RunStyle = field(default_factory=RunStyle)
+    footnote_id: Optional[int] = None  # ID of footnote referenced by this run
 
 
 @dataclass
@@ -67,6 +71,19 @@ class ParagraphFormat:
     keep_with_next: Optional[bool] = None
     page_break_before: Optional[bool] = None
     widow_control: Optional[bool] = None
+
+
+@dataclass
+class Footnote:
+    """A footnote in a document."""
+    id: int  # Unique footnote ID
+    paragraphs: List[Paragraph] = field(default_factory=list)  # Footnote content as paragraphs
+    original_id: Optional[int] = None  # Original footnote ID from source document
+    
+    @property
+    def text(self) -> str:
+        """Get the full text of the footnote."""
+        return "\n".join(p.text for p in self.paragraphs if not p.is_empty())
 
 
 @dataclass
@@ -101,6 +118,44 @@ class Paragraph:
     def is_list_item(self) -> bool:
         """Check if paragraph is a list item."""
         return self.style_name and 'list' in self.style_name.lower()
+    
+    def is_numbered_list_item(self) -> bool:
+        """
+        Check if paragraph is an actual numbered list item (not just List Paragraph style).
+        Distinguishes between:
+        - "List Paragraph" style (can be headings) - returns False
+        - Actual numbered/bulleted list items - returns True
+        """
+        # Check if it has actual numbering properties in metadata
+        if self.metadata.get('is_numbered_list'):
+            return True
+        
+        # If style is "List Paragraph" (exact match), it's NOT a numbered list item
+        if self.style_name and self.style_name.lower() == 'list paragraph':
+            return False
+        
+        # Check text content: if it starts with Hebrew gematria number followed by period,
+        # it's a numbered list item (e.g., "יט. אמר בכל פסקא...")
+        from word_parser.core.processing import is_valid_gematria_number
+        
+        text = self.text.strip()
+        # Pattern: 1-4 Hebrew letters (gematria) followed by period and optional space
+        # This catches patterns like "יט. " or "יט.אמר" (with or without space)
+        siman_match = re.match(r"^([א-ת]{1,4})\.\s*", text)
+        if siman_match:
+            siman_text = siman_match.group(1)
+            if is_valid_gematria_number(siman_text):
+                # Make sure there's actual content after the number (not just "יט.")
+                remaining_text = text[len(siman_match.group(0)):].strip()
+                if remaining_text:  # There's content after the number
+                    print(f"DEBUG: Detected numbered list item by text pattern: '{text[:50]}' (gematria: {siman_text})")
+                    return True  # This is a numbered list item, not a heading
+        
+        # If style contains "list" but is not "List Paragraph", it's likely a numbered list
+        #if self.style_name and 'list' in self.style_name.lower():
+           # return True
+        
+        return False
 
 
 @dataclass
@@ -126,6 +181,7 @@ class Document:
     writers convert from this representation to their target format.
     """
     paragraphs: List[Paragraph] = field(default_factory=list)
+    footnotes: List[Footnote] = field(default_factory=list)  # Document footnotes
     metadata: DocumentMetadata = field(default_factory=DocumentMetadata)
     
     # Heading content (separate from body paragraphs for clarity)
@@ -176,3 +232,14 @@ class Document:
             self.metadata.parshah = h3
         if h4:
             self.metadata.subsection = h4
+    
+    def add_footnote(self, footnote: Footnote) -> None:
+        """Add a footnote to the document."""
+        self.footnotes.append(footnote)
+    
+    def get_footnote_by_id(self, footnote_id: int) -> Optional[Footnote]:
+        """Get a footnote by its ID."""
+        for fn in self.footnotes:
+            if fn.id == footnote_id:
+                return fn
+        return None

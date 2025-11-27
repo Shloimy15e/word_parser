@@ -75,11 +75,6 @@ class JsonWriter(OutputWriter):
             book_parts.append(doc.heading2)
         book_name = " - ".join(book_parts) if book_parts else ""
 
-        # Build base chunk title from H3 (and optionally H4)
-        base_chunk_title = doc.heading3 or ""
-        if doc.heading4 and doc.heading4 != doc.heading3:
-            base_chunk_title = f"{base_chunk_title} - {doc.heading4}"
-
         # Build metadata
         metadata = {
             "date": current_date,
@@ -99,25 +94,55 @@ class JsonWriter(OutputWriter):
             "book_name_he": book_name,
             "book_name_en": "",
             "book_metadata": metadata,
-            "chunks": self._build_chunks(doc, base_chunk_title, opts),
+            "chunks": self._build_chunks(doc, opts),
         }
 
         return json_data
 
     def _build_chunks(
-        self, doc: Document, base_chunk_title: str, opts: Dict[str, Any]
+        self, doc: Document, opts: Dict[str, Any]
     ) -> List[Dict]:
         """Build the chunks array from document paragraphs."""
         strategy = opts.get("chunking_strategy", "paragraph")
 
         if strategy == "h3":
-            return self._build_chunks_h3(doc, opts)
+            chunks = self._build_chunks_h3(doc, opts)
         elif strategy == "h4":
-            return self._build_chunks_h4(doc, opts)
+            chunks = self._build_chunks_h4(doc, opts)
         elif strategy == "chunk":
-            return self._build_chunks_asterisk(doc, opts)
+            chunks = self._build_chunks_asterisk(doc, opts)
         else:
-            return self._build_chunks_paragraph(doc, base_chunk_title, opts)
+            chunks = self._build_chunks_paragraph(doc, opts)
+        
+        # Add footnotes as chunks
+        if doc.footnotes:
+            footnote_chunks = self._build_footnote_chunks(doc, chunks)
+            chunks.extend(footnote_chunks)
+        
+        return chunks
+    
+    def _build_footnote_chunks(self, doc: Document, existing_chunks: List[Dict]) -> List[Dict]:
+        """Build chunks from footnotes."""
+        footnote_chunks = []
+        chunk_id = len(existing_chunks) + 1
+        
+        for footnote in doc.footnotes:
+            footnote_text = footnote.text.strip()
+            if footnote_text and not self._is_single_word_or_letter(footnote_text):
+                chunk_title = f"הערה {footnote.id}"
+                chunk = {
+                    "chunk_id": chunk_id,
+                    "chunk_metadata": {
+                        "chunk_title": chunk_title,
+                        "footnote_id": footnote.id,
+                        "is_footnote": True,
+                    },
+                    "text": footnote_text,
+                }
+                footnote_chunks.append(chunk)
+                chunk_id += 1
+        
+        return footnote_chunks
 
     def _is_single_word_or_letter(self, text: str) -> bool:
         """Check if text is a single word or single letter (should be skipped)."""
@@ -146,7 +171,7 @@ class JsonWriter(OutputWriter):
         return False
 
     def _build_chunks_paragraph(
-        self, doc: Document, base_chunk_title: str, opts: Dict[str, Any]
+        self, doc: Document, opts: Dict[str, Any]
     ) -> List[Dict]:
         """Original paragraph-based chunking."""
         chunks = []
@@ -155,11 +180,29 @@ class JsonWriter(OutputWriter):
 
         in_header_section = filter_headers
         chunk_id = 1
+        
+        # Track current H3 and H4 from paragraph-level headings
+        current_h3 = doc.heading3 or ""  # Start with document-level H3 if available
+        current_h4 = doc.heading4 or ""   # Start with document-level H4 if available
+        
+        # Track index for each unique heading3+heading4 combination (chunk title)
+        chunk_title_index_map = {}  # Maps (h3, h4) tuple to current index
 
         for para in doc.paragraphs:
             txt = para.text.strip()
 
-            # Skip heading paragraphs (for combined documents)
+            # Handle H3 paragraphs - update current H3, reset H4
+            if para.heading_level == HeadingLevel.HEADING_3:
+                current_h3 = txt
+                current_h4 = ""
+                continue
+
+            # Handle H4 paragraphs - update current H4
+            if para.heading_level == HeadingLevel.HEADING_4:
+                current_h4 = txt
+                continue
+
+            # Skip other heading paragraphs (H1, H2)
             if para.heading_level != HeadingLevel.NORMAL:
                 continue
 
@@ -199,11 +242,24 @@ class JsonWriter(OutputWriter):
                     else:
                         chunk_title = str(chunk_id)
                 else:
-                    chunk_title = (
-                        f"{base_chunk_title} {chunk_id}"
-                        if base_chunk_title
-                        else str(chunk_id)
-                    )
+                    # Build chunk title with current H3 and H4 (from paragraph-level headings)
+                    # Track index for the entire chunk title (heading3+heading4 combination)
+                    heading_key = (current_h3, current_h4)
+                    if heading_key not in chunk_title_index_map:
+                        chunk_title_index_map[heading_key] = 0
+                    chunk_title_index_map[heading_key] += 1
+                    title_index = chunk_title_index_map[heading_key]
+                    
+                    title_parts = []
+                    if current_h3:
+                        title_parts.append(current_h3)
+                    if current_h4:
+                        title_parts.append(current_h4)
+                    
+                    if title_parts:
+                        chunk_title = " - ".join(title_parts) + f" {title_index}"
+                    else:
+                        chunk_title = str(chunk_id)
 
                 chunk = {
                     "chunk_id": chunk_id,
