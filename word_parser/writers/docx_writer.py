@@ -9,7 +9,7 @@ from docx import Document as DocxDocument
 from docx.shared import Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
-from word_parser.core.document import Document, Paragraph, HeadingLevel, Alignment
+from word_parser.core.document import Document, HeadingLevel, Alignment
 from word_parser.core.processing import is_old_header, should_start_content
 from word_parser.writers.base import OutputWriter, WriterRegistry
 
@@ -86,6 +86,25 @@ class DocxWriter(OutputWriter):
         except KeyError:
             pass
 
+    def _format_parshah_heading(self, text: str, skip_prefix: bool) -> str:
+        """
+        Format parshah heading with or without prefix.
+
+        Handles stripping existing prefix to avoid duplication or ensure removal.
+        """
+        if not text:
+            return text
+
+        # Remove existing prefix if present (to ensure clean slate)
+        clean_text = text.strip()
+        if clean_text.startswith("פרשת "):
+            clean_text = clean_text[5:].strip()
+
+        if skip_prefix:
+            return clean_text
+        else:
+            return f"פרשת {clean_text}"
+
     def _add_headings(
         self, docx_doc: DocxDocument, doc: Document, skip_parshah_prefix: bool
     ) -> None:
@@ -97,7 +116,7 @@ class DocxWriter(OutputWriter):
         if doc.heading2:
             headings.append(("Heading 2", doc.heading2))
         if doc.heading3:
-            h3_text = doc.heading3 if skip_parshah_prefix else f"פרשת {doc.heading3}"
+            h3_text = self._format_parshah_heading(doc.heading3, skip_parshah_prefix)
             headings.append(("Heading 3", h3_text))
         if doc.heading4:
             headings.append(("Heading 4", doc.heading4))
@@ -123,6 +142,22 @@ class DocxWriter(OutputWriter):
         for para in doc.paragraphs:
             txt = para.text.strip()
 
+            # Handle heading paragraphs (for combined documents)
+            if para.heading_level != HeadingLevel.NORMAL:
+                # Map heading level to style name
+                style_map = {
+                    HeadingLevel.HEADING_1: "Heading 1",
+                    HeadingLevel.HEADING_2: "Heading 2",
+                    HeadingLevel.HEADING_3: "Heading 3",
+                    HeadingLevel.HEADING_4: "Heading 4",
+                }
+                style_name = style_map.get(para.heading_level)
+                if style_name and txt:
+                    h = docx_doc.add_paragraph(txt, style=style_name)
+                    h.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                    h.paragraph_format.right_to_left = True
+                continue  # Skip to next paragraph
+
             # Handle multi-parshah mode
             if is_multi_parshah:
                 # Skip parshah marker lines (*, ה, etc.)
@@ -135,10 +170,8 @@ class DocxWriter(OutputWriter):
                     if parshah_name and parshah_name != current_parshah:
                         current_parshah = parshah_name
                         # Add the parshah as a Heading 3
-                        h3_text = (
-                            parshah_name
-                            if skip_parshah_prefix
-                            else f"פרשת {parshah_name}"
+                        h3_text = self._format_parshah_heading(
+                            parshah_name, skip_parshah_prefix
                         )
                         h3 = docx_doc.add_paragraph(h3_text, style="Heading 3")
                         h3.alignment = WD_ALIGN_PARAGRAPH.RIGHT
@@ -166,7 +199,7 @@ class DocxWriter(OutputWriter):
                 continue
 
             # Skip paragraphs that are only markers (ה, *, ***, * * *)
-            if txt in ("h", "q"):
+            if txt in ("h", "q", "Y"):
                 continue
 
             # Create new paragraph

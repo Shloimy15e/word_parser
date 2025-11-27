@@ -201,6 +201,22 @@ def extract_heading4_info(filename_stem: str) -> Optional[str]:
         else:
             return "הקדמה"
 
+    # Pattern: chelek/חלק followed by number (with optional leading zeros) and optional letter
+    chelek_match = re.match(r"^(?:chelek|חלק)0*(\d+)([a-z])?$", stem, re.IGNORECASE)
+    if chelek_match:
+        number = int(chelek_match.group(1))
+        letter = chelek_match.group(2)
+
+        # Convert number to Hebrew gematria
+        hebrew_gematria = number_to_hebrew_gematria(number)
+
+        if letter:
+            # Convert letter to number (a=1, b=2, etc.)
+            letter_num = ord(letter.lower()) - ord("a") + 1
+            return f"חלק {hebrew_gematria} {letter_num}"
+        else:
+            return f"חלק {hebrew_gematria}"
+
     # Pattern: perek followed by number (with optional leading zeros) and optional letter
     perek_match = re.match(r"^perek0*(\d+)([a-z])?$", stem, re.IGNORECASE)
     if perek_match:
@@ -253,6 +269,26 @@ def extract_daf_headings(filename_stem: str) -> Tuple[Optional[str], Optional[st
             return (f"הקדמה {hebrew_gematria}", None)
         else:
             return ("הקדמה", None)
+
+    # Pattern: chelek/חלק followed by number (with optional leading zeros) and optional letter
+    chelek_match = re.match(r"^(?:chelek|חלק)0*(\d+)([a-z])?$", stem, re.IGNORECASE)
+    if chelek_match:
+        number = int(chelek_match.group(1))
+        letter = chelek_match.group(2)
+
+        # Convert number to Hebrew gematria
+        hebrew_gematria = number_to_hebrew_gematria(number)
+        heading3 = f"חלק {hebrew_gematria}"
+
+        if letter:
+            # Convert letter to Hebrew "חלק" (section)
+            letter_gematria = number_to_hebrew_gematria(
+                ord(letter.lower()) - ord("a") + 1
+            )
+            heading4 = f"חלק {letter_gematria}"
+            return (heading3, heading4)
+        else:
+            return (heading3, None)
 
     # Pattern: perek followed by number (with optional leading zeros) and optional letter
     perek_match = re.match(r"^perek0*(\d+)([a-z])?$", stem, re.IGNORECASE)
@@ -545,96 +581,98 @@ def sanitize_xml_text(text: str) -> str:
 def is_page_marking(text: str) -> bool:
     """
     Check if a paragraph is a page marking that should be removed.
-    
+
     Page markings are:
     1. ((xxx)) - Text in double parentheses (e.g., ((תקכב)), ((כב)))
     2. #א or א# - Hebrew letter with # symbol
-    
+
     Returns True if the text is a page marking.
     """
     txt = text.strip()
     if not txt:
         return False
-    
+
     # Pattern 1: ((xxx)) - double parentheses
-    if re.match(r'^\(\(.+\)\)$', txt):
+    if re.match(r"^\(\(.+\)\)$", txt):
         return True
-    
+
     # Pattern 2: #א or א# - Hebrew letter with # (one or more letters)
-    if re.match(r'^#[א-ת]+$', txt) or re.match(r'^[א-ת]+#$', txt):
+    if re.match(r"^#[א-ת]+$", txt) or re.match(r"^[א-ת]+#$", txt):
         return True
-    
+
     return False
 
 
 def remove_page_markings(doc):
     """
     Remove page markings from document and merge split paragraphs.
-    
+
     Page markings like ((תקכב)) or #א that appear between content paragraphs
     are removed, and the paragraphs above and below are merged into one.
-    
+
     Args:
         doc: The document to process (Document instance)
-        
+
     Returns:
         The document with page markings removed and paragraphs merged
     """
     if not doc.paragraphs:
         return doc
-    
+
     from word_parser.core.document import HeadingLevel
-    
+
     new_paragraphs = []
     i = 0
-    
+
     while i < len(doc.paragraphs):
         current_para = doc.paragraphs[i]
         current_text = current_para.text.strip()
-        
+
         # Check if current paragraph is a page marking
         if is_page_marking(current_text):
             # This is a page marking - check if we should merge paragraphs
             has_prev = len(new_paragraphs) > 0
             has_next = i + 1 < len(doc.paragraphs)
-            
+
             if has_prev and has_next:
                 prev_para = new_paragraphs[-1]
                 next_para = doc.paragraphs[i + 1]
-                
+
                 # Only merge if both surrounding paragraphs are non-empty content (not headings)
                 prev_text = prev_para.text.strip()
                 next_text = next_para.text.strip()
-                
+
                 is_prev_content = (
-                    prev_text and 
-                    prev_para.heading_level == HeadingLevel.NORMAL and
-                    not is_page_marking(prev_text)
+                    prev_text
+                    and prev_para.heading_level == HeadingLevel.NORMAL
+                    and not is_page_marking(prev_text)
                 )
                 is_next_content = (
-                    next_text and 
-                    next_para.heading_level == HeadingLevel.NORMAL and
-                    not is_page_marking(next_text)
+                    next_text
+                    and next_para.heading_level == HeadingLevel.NORMAL
+                    and not is_page_marking(next_text)
                 )
-                
+
                 if is_prev_content and is_next_content:
                     # Merge: append next paragraph text to previous paragraph
                     # Add a space between them to ensure proper word separation
-                    merged_text = prev_para.text.rstrip() + " " + next_para.text.lstrip()
+                    merged_text = (
+                        prev_para.text.rstrip() + " " + next_para.text.lstrip()
+                    )
                     prev_para.text = merged_text
-                    
+
                     # Skip the page marking and the next paragraph (already merged)
                     i += 2
                     continue
-            
+
             # If we didn't merge, just skip the page marking
             i += 1
             continue
-        
+
         # Normal paragraph - add to results
         new_paragraphs.append(current_para)
         i += 1
-    
+
     doc.paragraphs = new_paragraphs
     return doc
 
@@ -665,8 +703,8 @@ def clean_dos_text(text: str) -> str:
 
         temp = line
 
-        # Remove >number< footnote markers
-        temp = re.sub(r">\d+<", "", temp)
+        # Remove >number< footnote markers (including those with Hebrew letters like >3ט<)
+        temp = re.sub(r">[\d\u0590-\u05ff]+<", "", temp)
 
         # Remove BNARF/OISAR/BSNF markers
         temp = re.sub(r"(BNARF|OISAR|BSNF)\s+[A-Z]\s+\d+[\*]?", "", temp)

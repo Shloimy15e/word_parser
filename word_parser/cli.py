@@ -16,6 +16,7 @@ To add new document formats (schemas):
 """
 
 import argparse
+import copy
 import traceback
 from pathlib import Path
 from typing import Optional
@@ -33,6 +34,7 @@ from word_parser.core.formats import FormatRegistry
 from word_parser.readers import ReaderRegistry
 from word_parser.writers import WriterRegistry
 from word_parser.utils import get_processable_files, get_file_stem
+from word_parser.core.document import Document, Paragraph, HeadingLevel
 
 
 class DocumentProcessor:
@@ -80,7 +82,7 @@ class DocumentProcessor:
         if document_format:
             self.format_handler = FormatRegistry.get_format(document_format)
             if not self.format_handler:
-                available = ", ".join(FormatRegistry.list_formats())
+                available = ", ".join(fmt["name"] for fmt in FormatRegistry.list_formats())
                 raise ValueError(
                     f"Unknown document format: {document_format}. "
                     f"Available formats: {available}"
@@ -117,9 +119,9 @@ class DocumentProcessor:
         self,
         input_path: Path,
         output_path: Path,
-        book: str,
-        sefer: str,
-        parshah: str,
+        book: Optional[str] = None,
+        sefer: Optional[str] = None,
+        parshah: Optional[str] = None,
         filename: Optional[str] = None,
         skip_parshah_prefix: bool = False,
     ) -> None:
@@ -129,9 +131,9 @@ class DocumentProcessor:
         Args:
             input_path: Path to input file
             output_path: Path for output file
-            book: Book title (H1)
-            sefer: Sefer/tractate title (H2)
-            parshah: Parshah name (H3)
+            book: Book title (H1) - optional for formatted format
+            sefer: Sefer/tractate title (H2) - optional for formatted format
+            parshah: Parshah name (H3) - optional for formatted format
             filename: Optional filename info (H4)
             skip_parshah_prefix: Don't add 'פרשת' prefix
         """
@@ -147,8 +149,8 @@ class DocumentProcessor:
         # Read document
         doc = reader.read(input_path)
 
-        # Set headings
-        doc.set_headings(h1=book, h2=sefer, h3=parshah, h4=filename)
+        # Set headings (use empty string if None for compatibility)
+        doc.set_headings(h1=book or "", h2=sefer, h3=parshah, h4=filename)
 
         # Build context for format processing
         context = {
@@ -243,9 +245,9 @@ def process_single_file(args, file_path: Path, out_dir: Path) -> None:
     filename_stem = file_path.stem
     title = filename_stem.replace("-formatted", "")
 
-    # Determine headings
-    sefer = args.sefer or file_path.parent.name
-    parshah = args.parshah or title
+    # Determine headings (for formatted format, these can be None)
+    sefer = args.sefer if args.sefer else (file_path.parent.name if document_format != "formatted" else None)
+    parshah = args.parshah if args.parshah else (title if document_format != "formatted" else None)
 
     year = extract_year(filename_stem)
     heading4_info = extract_heading4_info(filename_stem)
@@ -265,9 +267,12 @@ def process_single_file(args, file_path: Path, out_dir: Path) -> None:
         out_path = out_dir / out_name
 
     print(f"📄 Processing single file: {file_path.name}")
-    print(f"   Book (H1): {args.book}")
-    print(f"   Sefer (H2): {sefer}")
-    print(f"   Section (H3): {parshah}")
+    if args.book:
+        print(f"   Book (H1): {args.book}")
+    if sefer:
+        print(f"   Sefer (H2): {sefer}")
+    if parshah:
+        print(f"   Section (H3): {parshah}")
     if heading4 != title:
         print(f"   Subsection (H4): {heading4}")
     print()
@@ -305,8 +310,61 @@ def process_folder_structure(args, docs_dir: Path, out_dir: Path) -> None:
     sefer = docs_dir.name
     subdirs = [d for d in docs_dir.iterdir() if d.is_dir()]
 
+    # If no subdirectories but files exist, process files directly (for formats like perek-h3)
     if not subdirs:
-        print(f"No subdirectories found in {docs_dir}")
+        files = get_processable_files(docs_dir)
+        if files:
+            print(f"📚 Processing folder: {sefer} (no subdirectories, processing files directly)\n")
+            # Create output directory
+            if args.json:
+                out_subdir = out_dir / "json" / sefer
+            else:
+                out_subdir = out_dir / sefer
+            out_subdir.mkdir(parents=True, exist_ok=True)
+            
+            total_success = 0
+            for i, path in enumerate(files, 1):
+                try:
+                    filename_stem = get_file_stem(path)
+                    title = filename_stem.replace("-formatted", "")
+                    
+                    # Try to extract year, then heading4 info, then use title
+                    year = extract_year(title)
+                    heading4_info = extract_heading4_info(title)
+                    heading4 = year or heading4_info or title
+                    
+                    ext = processor.get_output_extension()
+                    if args.json:
+                        out_name = f"{filename_stem}.json"
+                    else:
+                        out_name = f"{filename_stem.replace('-formatted', '')}-formatted{ext}"
+                    out_path = out_subdir / out_name
+                    
+                    file_display_name = path.stem if path.suffix else path.name
+                    print(
+                        f"  [{i}/{len(files)}] {file_display_name} → {out_path.name} ...",
+                        end=" ",
+                    )
+                    
+                    processor.process_file(
+                        path,
+                        out_path,
+                        args.book,
+                        sefer,
+                        None,  # No parshah for perek-h3 format
+                        heading4,
+                        args.skip_parshah_prefix,
+                    )
+                    print("✓ done")
+                    total_success += 1
+                except Exception as e:
+                    print(f"⚠️ error: {e}")
+                    traceback.print_exc()
+            
+            print(f"\n✅ All done. Successfully processed {total_success}/{len(files)} file(s).")
+            return
+        
+        print(f"No subdirectories or files found in {docs_dir}")
         return
 
     print(f"📚 Processing folder structure: {sefer}\n")
@@ -325,9 +383,21 @@ def process_folder_structure(args, docs_dir: Path, out_dir: Path) -> None:
 
         if args.combine_parshah:
             print(f"📂 Combining {parshah} ...")
-            # combine_parshah_docs(subdir, out_subdir, args.book, sefer, parshah, args.skip_parshah_prefix)
-            print("  ⚠️ Combine mode not yet implemented in refactored version")
-            total_success += 1
+            try:
+                combine_parshah_docs(
+                    processor,
+                    subdir,
+                    out_subdir,
+                    args.book,
+                    sefer,
+                    parshah,
+                    args.skip_parshah_prefix,
+                )
+                print("  ✓ done")
+                total_success += 1
+            except Exception as e:
+                print(f"  ⚠️ error: {e}")
+                traceback.print_exc()
             continue
 
         files = get_processable_files(subdir)
@@ -400,8 +470,52 @@ def process_daf_mode(args, docs_dir: Path, out_dir: Path) -> None:
     # Get all subdirectories
     folder_dirs = [d for d in docs_dir.iterdir() if d.is_dir()]
 
+    # If no subdirectories but files exist, process files directly (for formats like perek-h3)
     if not folder_dirs:
-        print(f"No subdirectories found in {docs_dir}")
+        files = get_processable_files(docs_dir)
+        if files:
+            print(f"📚 Processing in daf mode (no subdirectories, processing files directly)")
+            print(f"   Book (H1): {book_name}\n")
+            
+            # Create output directory
+            if args.json:
+                out_subdir = out_dir / "json" / docs_dir.name
+            else:
+                out_subdir = out_dir / docs_dir.name
+            out_subdir.mkdir(parents=True, exist_ok=True)
+            
+            total_success = 0
+            for i, path in enumerate(files, 1):
+                try:
+                    filename_stem = get_file_stem(path)
+                    title = filename_stem.replace("-formatted", "")
+                    
+                    ext = processor.get_output_extension()
+                    if args.json:
+                        out_name = f"{filename_stem}.json"
+                    else:
+                        out_name = f"{filename_stem.replace('-formatted', '')}-formatted{ext}"
+                    out_path = out_subdir / out_name
+                    
+                    file_display_name = path.stem if path.suffix else path.name
+                    print(
+                        f"  [{i}/{len(files)}] {file_display_name} → {out_path.name} ...",
+                        end=" ",
+                    )
+                    
+                    processor.process_file_daf_mode(
+                        path, out_path, book_name, docs_dir.name, title
+                    )
+                    print("✓ done")
+                    total_success += 1
+                except Exception as e:
+                    print(f"⚠️ error: {e}")
+                    traceback.print_exc()
+            
+            print(f"\n✅ All done. Successfully processed {total_success}/{len(files)} file(s).")
+            return
+        
+        print(f"No subdirectories or files found in {docs_dir}")
         return
 
     print(f"📚 Processing in daf mode")
@@ -425,8 +539,19 @@ def process_daf_mode(args, docs_dir: Path, out_dir: Path) -> None:
 
         if args.combine_parshah:
             print(f"📂 Combining {folder_name} ...")
-            print("  ⚠️ Combine mode not yet implemented in refactored version")
-            total_success += 1
+            try:
+                combine_parshah_docs_daf_mode(
+                    processor,
+                    folder_dir,
+                    out_subdir,
+                    book_name,
+                    folder_name,
+                )
+                print("  ✓ done")
+                total_success += 1
+            except Exception as e:
+                print(f"  ⚠️ error: {e}")
+                traceback.print_exc()
             continue
 
         print(f"📂 {folder_name} ({len(files)} file(s))")
@@ -463,6 +588,294 @@ def process_daf_mode(args, docs_dir: Path, out_dir: Path) -> None:
         print()
 
     print(f"✅ All done. Successfully processed {total_success}/{total_files} file(s).")
+
+
+def combine_parshah_docs(
+    processor: DocumentProcessor,
+    subdir: Path,
+    out_subdir: Path,
+    book: str,
+    sefer: str,
+    parshah: str,
+    skip_parshah_prefix: bool,
+) -> None:
+    """
+    Combine all documents in a folder into one file.
+
+    Headings are only added:
+    1. The first time they appear
+    2. When that specific heading level changes
+
+    Args:
+        processor: DocumentProcessor instance
+        subdir: Input directory containing files to combine
+        out_subdir: Output directory for combined file
+        book: Book title (H1)
+        sefer: Sefer/tractate title (H2)
+        parshah: Parshah name (H3)
+        skip_parshah_prefix: Don't add 'פרשת' prefix
+    """
+    files = get_processable_files(subdir)
+    if not files:
+        return
+
+    # Create combined document
+    combined_doc = Document()
+
+    # Add initial headings at the beginning (H1, H2, H3)
+    # These are known and should always appear at the start
+    h3_val = (
+        parshah if skip_parshah_prefix else (f"פרשת {parshah}" if parshah else None)
+    )
+
+    if book:
+        combined_doc.add_paragraph(book, heading_level=HeadingLevel.HEADING_1)
+    if sefer:
+        combined_doc.add_paragraph(sefer, heading_level=HeadingLevel.HEADING_2)
+    if h3_val:
+        combined_doc.add_paragraph(h3_val, heading_level=HeadingLevel.HEADING_3)
+
+    # Track last seen heading values (set to initial values)
+    last_h1 = book
+    last_h2 = sefer
+    last_h3 = h3_val
+    last_h4 = None
+
+    # Process each file
+    for file_path in files:
+        # Get reader for input file
+        reader = ReaderRegistry.get_reader_for_file(file_path)
+        if not reader:
+            continue
+
+        # Read document
+        doc = reader.read(file_path)
+
+        # Extract info from filename
+        filename_stem = get_file_stem(file_path)
+        title = filename_stem.replace("-formatted", "")
+        year = extract_year(filename_stem)
+        heading4_info = extract_heading4_info(filename_stem)
+        heading4 = year or heading4_info or title
+
+        # Set headings on the document
+        doc.set_headings(h1=book, h2=sefer, h3=parshah, h4=heading4)
+
+        # Build context for format processing
+        context = {
+            "book": book,
+            "sefer": sefer,
+            "parshah": parshah,
+            "filename": heading4,
+            "input_path": str(file_path),
+            "skip_parshah_prefix": skip_parshah_prefix,
+            "special_heading": processor.special_heading,
+            "font_size_heading": processor.font_size_heading,
+        }
+
+        # Apply document format processing
+        doc = processor._apply_format(doc, context)
+
+        # Determine heading values (with prefix handling for H3)
+        h1_val = doc.heading1
+        h2_val = doc.heading2
+        h3_val = (
+            doc.heading3
+            if skip_parshah_prefix
+            else (f"פרשת {doc.heading3}" if doc.heading3 else None)
+        )
+        h4_val = doc.heading4
+
+        # Add headings only when they change
+        if h1_val and h1_val != last_h1:
+            para = combined_doc.add_paragraph(
+                h1_val, heading_level=HeadingLevel.HEADING_1
+            )
+            last_h1 = h1_val
+
+        if h2_val and h2_val != last_h2:
+            para = combined_doc.add_paragraph(
+                h2_val, heading_level=HeadingLevel.HEADING_2
+            )
+            last_h2 = h2_val
+
+        if h3_val and h3_val != last_h3:
+            para = combined_doc.add_paragraph(
+                h3_val, heading_level=HeadingLevel.HEADING_3
+            )
+            last_h3 = h3_val
+
+        if h4_val and h4_val != last_h4:
+            para = combined_doc.add_paragraph(
+                h4_val, heading_level=HeadingLevel.HEADING_4
+            )
+            last_h4 = h4_val
+
+        # Add all body paragraphs from this document
+        for para in doc.paragraphs:
+            # Skip heading paragraphs (we handle headings separately above)
+            if para.heading_level != HeadingLevel.NORMAL:
+                continue
+
+            # Create a deep copy of the paragraph
+            new_para = copy.deepcopy(para)
+            new_para.heading_level = HeadingLevel.NORMAL
+            combined_doc.paragraphs.append(new_para)
+
+    # Set headings on combined document to None so writer doesn't add them at start
+    # (we've already added them as paragraphs when they changed)
+    combined_doc.set_headings(h1=None, h2=None, h3=None, h4=None)
+
+    # Determine output filename
+    ext = processor.get_output_extension()
+    if processor.output_format == "json":
+        out_name = f"{parshah}.json"
+    else:
+        out_name = f"{parshah}-combined{ext}"
+    out_path = out_subdir / out_name
+
+    # Write combined document
+    processor.writer.write(
+        combined_doc,
+        out_path,
+        skip_parshah_prefix=skip_parshah_prefix,
+        chunking_strategy=processor.chunking_strategy,
+    )
+
+
+def combine_parshah_docs_daf_mode(
+    processor: DocumentProcessor,
+    folder_dir: Path,
+    out_subdir: Path,
+    book: str,
+    folder_name: str,
+) -> None:
+    """
+    Combine all documents in a folder into one file (daf mode).
+
+    Headings are only added:
+    1. The first time they appear
+    2. When that specific heading level changes
+
+    Args:
+        processor: DocumentProcessor instance
+        folder_dir: Input directory containing files to combine
+        out_subdir: Output directory for combined file
+        book: Book title (H1)
+        folder_name: Folder name (H2)
+    """
+    files = get_processable_files(folder_dir)
+    if not files:
+        return
+
+    # Create combined document
+    combined_doc = Document()
+
+    # Add initial headings at the beginning (H1, H2)
+    # These are known and should always appear at the start
+    if book:
+        combined_doc.add_paragraph(book, heading_level=HeadingLevel.HEADING_1)
+    if folder_name:
+        combined_doc.add_paragraph(folder_name, heading_level=HeadingLevel.HEADING_2)
+
+    # Track last seen heading values (set to initial values)
+    last_h1 = book
+    last_h2 = folder_name
+    last_h3 = None
+    last_h4 = None
+
+    # Process each file
+    for file_path in files:
+        # Get reader for input file
+        reader = ReaderRegistry.get_reader_for_file(file_path)
+        if not reader:
+            continue
+
+        # Read document
+        doc = reader.read(file_path)
+
+        # Extract headings from filename
+        filename_stem = get_file_stem(file_path)
+        title = filename_stem.replace("-formatted", "")
+        heading3, heading4 = extract_daf_headings(title)
+
+        # Set headings on the document
+        doc.set_headings(h1=book, h2=folder_name, h3=heading3, h4=heading4)
+
+        # Build context for format processing
+        context = {
+            "book": book,
+            "daf_folder": folder_name,
+            "filename": title,
+            "input_path": str(file_path),
+            "daf_mode": True,
+            "special_heading": processor.special_heading,
+            "font_size_heading": processor.font_size_heading,
+        }
+
+        # Apply document format processing
+        doc = processor._apply_format(doc, context)
+
+        # Get heading values
+        h1_val = doc.heading1
+        h2_val = doc.heading2
+        h3_val = doc.heading3
+        h4_val = doc.heading4
+
+        # Add headings only when they change (H1 and H2 already added, so skip if same)
+        if h1_val and h1_val != last_h1:
+            para = combined_doc.add_paragraph(
+                h1_val, heading_level=HeadingLevel.HEADING_1
+            )
+            last_h1 = h1_val
+
+        if h2_val and h2_val != last_h2:
+            para = combined_doc.add_paragraph(
+                h2_val, heading_level=HeadingLevel.HEADING_2
+            )
+            last_h2 = h2_val
+
+        if h3_val and h3_val != last_h3:
+            para = combined_doc.add_paragraph(
+                h3_val, heading_level=HeadingLevel.HEADING_3
+            )
+            last_h3 = h3_val
+
+        if h4_val and h4_val != last_h4:
+            para = combined_doc.add_paragraph(
+                h4_val, heading_level=HeadingLevel.HEADING_4
+            )
+            last_h4 = h4_val
+
+        # Add all body paragraphs from this document
+        for para in doc.paragraphs:
+            # Skip heading paragraphs (we handle headings separately above)
+            if para.heading_level != HeadingLevel.NORMAL:
+                continue
+
+            # Create a deep copy of the paragraph
+            new_para = copy.deepcopy(para)
+            new_para.heading_level = HeadingLevel.NORMAL
+            combined_doc.paragraphs.append(new_para)
+
+    # Set headings on combined document to None so writer doesn't add them at start
+    # (we've already added them as paragraphs when they changed)
+    combined_doc.set_headings(h1=None, h2=None, h3=None, h4=None)
+
+    # Determine output filename
+    ext = processor.get_output_extension()
+    if processor.output_format == "json":
+        out_name = f"{folder_name}.json"
+    else:
+        out_name = f"{folder_name}-combined{ext}"
+    out_path = out_subdir / out_name
+
+    # Write combined document
+    processor.writer.write(
+        combined_doc,
+        out_path,
+        chunking_strategy=processor.chunking_strategy,
+    )
 
 
 def main():
@@ -534,7 +947,7 @@ To add new formats, see the word_parser.readers and word_parser.writers packages
     )
     parser.add_argument(
         "--format",
-        help="Document format/schema (e.g., standard, daf, siman, multi-parshah). Auto-detected if not specified.",
+        help="Document format/schema (e.g., standard, daf, siman, multi-parshah, perek-h2). Auto-detected if not specified.",
     )
 
     parser.add_argument(
@@ -576,9 +989,10 @@ To add new formats, see the word_parser.readers and word_parser.writers packages
             print(f"  {name}: {desc}")
         return
 
-    # Validate --book is provided when not in daf mode
-    if not args.daf and not args.book:
-        parser.error("--book is required unless using --daf mode")
+    # Validate --book is provided when not in daf mode or formatted format
+    # Formatted format can extract headings from the document itself
+    if not args.daf and not args.book and getattr(args, "format", None) != "formatted" and getattr(args, "format", None) != "folder-filename":
+        parser.error("--book is required unless using --daf mode or --format formatted or --format folder-filename")
 
     docs_path = Path(args.docs)
     out_dir = Path(args.out)
@@ -613,16 +1027,24 @@ To add new formats, see the word_parser.readers and word_parser.writers packages
         process_folder_structure(args, docs_path, out_dir)
         return
 
+    # Check if format doesn't require parshah (like perek-h3)
+    document_format = getattr(args, "format", None)
+    formats_without_parshah = ["perek-h3", "perek-h2", "formatted"]
+    format_doesnt_need_parshah = document_format in formats_without_parshah
+
     # Original single folder mode
-    if not args.sefer or not args.parshah:
-        print(
-            "Error: Both --sefer and --parshah are required when not using folder structure mode"
-        )
-        return
+    if not args.sefer or (not args.parshah and not format_doesnt_need_parshah):
+        if format_doesnt_need_parshah:
+            # For formats that don't need parshah, allow sefer-only
+            pass  # Continue to process single folder
+        else:
+            print(
+                "Error: Both --sefer and --parshah are required when not using folder structure mode"
+            )
+            return
 
     # Process single folder
     output_format = "json" if args.json else "docx"
-    document_format = getattr(args, "format", None)
     processor = DocumentProcessor(
         output_format=output_format,
         document_format=document_format,
