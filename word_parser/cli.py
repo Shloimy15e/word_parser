@@ -895,12 +895,98 @@ def combine_parshah_docs_daf_mode(
     )
 
 
+def process_seif_footnotes(args, out_dir: Path) -> None:
+    """
+    Process seif-footnotes mode: merge content and footnotes files by matching seif markers.
+    
+    This mode:
+    - Does NOT require --book, --sefer, --parshah, or any other arguments
+    - Preserves ALL headings, metadata, and formatting exactly as-is from the content file
+    - Only merges footnotes by matching seif markers (Hebrew letters)
+    - Does NOT apply any format processing or transformations
+    
+    Args:
+        args: Parsed command line arguments
+        out_dir: Output directory
+    """
+    if not args.content_file:
+        print("Error: --content-file is required for seif-footnotes mode")
+        return
+    if not args.footnotes_file:
+        print("Error: --footnotes-file is required for seif-footnotes mode")
+        return
+    
+    content_path = Path(args.content_file)
+    footnotes_path = Path(args.footnotes_file)
+    
+    if not content_path.exists():
+        print(f"Error: Content file not found: {content_path}")
+        return
+    if not footnotes_path.exists():
+        print(f"Error: Footnotes file not found: {footnotes_path}")
+        return
+    
+    # Determine output format
+    output_format = "json" if args.json else "docx"
+    
+    # Determine output path
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if args.json:
+        json_dir = out_dir / "json"
+        json_dir.mkdir(parents=True, exist_ok=True)
+        output_name = f"{content_path.stem}-merged.json"
+        output_path = json_dir / output_name
+    else:
+        output_name = f"{content_path.stem}-merged.docx"
+        output_path = out_dir / output_name
+    
+    print(f"📄 Merging content and footnotes files (seif-footnotes mode)")
+    print(f"   Content file: {content_path.name}")
+    print(f"   Footnotes file: {footnotes_path.name}")
+    print(f"   Output: {output_path.name}")
+    print(f"   Note: All headings and formatting preserved exactly as-is")
+    print()
+    
+    try:
+        # Get the seif-footnotes writer
+        writer = WriterRegistry.get_writer("seif-footnotes")
+        if not writer:
+            print("Error: seif-footnotes writer not found")
+            return
+        
+        # Create a dummy document (will be ignored by the writer)
+        dummy_doc = Document()
+        
+        # Write merged document
+        # Note: We only pass output_format and chunking_strategy (for JSON)
+        # We do NOT pass skip_parshah_prefix or any other format-related options
+        # The writer preserves everything exactly as-is from the content file
+        print(f"   Merging files...", end=" ")
+        writer.write(
+            dummy_doc,
+            output_path,
+            content_file=str(content_path),
+            footnotes_file=str(footnotes_path),
+            output_format=output_format,
+            chunking_strategy=getattr(args, "json_chunking", "paragraph"),
+        )
+        print("✓ done")
+        print(f"\n✅ Merged document saved to: {output_path}")
+    except Exception as e:
+        print(f"⚠️ error: {e}")
+        traceback.print_exc()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Reformat Hebrew DOCX files to standardized schema.",
         epilog="""
 Supported input formats: .docx, .doc (requires Word), .idml, DOS-encoded Hebrew
 Supported output formats: docx, json
+
+Special modes:
+  --seif-footnotes: Merge content and footnotes files by matching seif markers
+                    (Hebrew letters like א, ב, ג). Requires --content-file and --footnotes-file.
 
 To add new formats, see the word_parser.readers and word_parser.writers packages.
         """,
@@ -978,6 +1064,19 @@ To add new formats, see the word_parser.readers and word_parser.writers packages
         default="paragraph",
         help="Chunking strategy for JSON output: paragraph (default), h4, h3, or chunk (chunks within each H3 by asterisk markers).",
     )
+    parser.add_argument(
+        "--content-file",
+        help="Content file for seif-footnotes mode (contains text with #(א) references)",
+    )
+    parser.add_argument(
+        "--footnotes-file",
+        help="Footnotes file for seif-footnotes mode (contains footnotes starting with 'א. ', 'ב. ', etc.)",
+    )
+    parser.add_argument(
+        "--seif-footnotes",
+        action="store_true",
+        help="Merge content and footnotes files by matching seif markers (Hebrew letters). Requires --content-file and --footnotes-file.",
+    )
 
     args = parser.parse_args()
 
@@ -1013,11 +1112,19 @@ To add new formats, see the word_parser.readers and word_parser.writers packages
 
     # Validate --book is provided when not in daf mode or formatted format
     # Formatted format can extract headings from the document itself
-    if not args.daf and not args.book and getattr(args, "format", None) != "formatted" and getattr(args, "format", None) != "folder-filename":
+    # Skip validation for seif-footnotes mode
+    is_seif_footnotes_mode = args.seif_footnotes or (args.content_file and args.footnotes_file)
+    if not is_seif_footnotes_mode and not args.daf and not args.book and getattr(args, "format", None) != "formatted" and getattr(args, "format", None) != "folder-filename":
         parser.error("--book is required unless using --daf mode or --format formatted or --format folder-filename")
 
     docs_path = Path(args.docs)
     out_dir = Path(args.out)
+
+    # Seif-footnotes mode - merge content and footnotes files
+    # This must come after out_dir is defined
+    if is_seif_footnotes_mode:
+        process_seif_footnotes(args, out_dir)
+        return
 
     # Create output directory
     out_dir.mkdir(exist_ok=True)

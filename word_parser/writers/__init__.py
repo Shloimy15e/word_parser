@@ -29,10 +29,12 @@ Example:
 from word_parser.writers.base import OutputWriter, WriterRegistry
 from word_parser.writers.docx_writer import DocxWriter
 from word_parser.writers.json_writer import JsonWriter
+from word_parser.writers.seif_footnotes_writer import SeifFootnotesWriter
 
 __all__ = [
     "OutputWriter",
     "WriterRegistry",
     "DocxWriter",
     "JsonWriter",
+    "SeifFootnotesWriter",
 ]
