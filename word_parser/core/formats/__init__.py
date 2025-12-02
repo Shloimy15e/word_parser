@@ -45,6 +45,7 @@ from word_parser.core.formats.formatted import FormattedFormat
 from word_parser.core.formats.h2_only import H2OnlyFormat
 from word_parser.core.formats.folder_filename import FolderFilenameFormat
 from word_parser.core.formats.minimal import MinimalFormat
+from word_parser.core.formats.haus_bachur import HausBachurFormat
 
 
 __all__ = [
@@ -63,4 +64,5 @@ __all__ = [
     "H2OnlyFormat",
     "FolderFilenameFormat",
     "MinimalFormat",
+    "HausBachurFormat",
 ]
