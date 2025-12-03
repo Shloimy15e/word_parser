@@ -404,6 +404,7 @@ def process_folder_structure(args, docs_dir: Path, out_dir: Path) -> None:
                     sefer,
                     parshah,
                     args.skip_parshah_prefix,
+                    getattr(args, "use_filename_for_h4", False),
                 )
                 print("  ✓ done")
                 total_success += 1
@@ -615,6 +616,7 @@ def combine_parshah_docs(
     sefer: str,
     parshah: str,
     skip_parshah_prefix: bool,
+    use_filename_for_h4: bool = False,
 ) -> None:
     """
     Combine all documents in a folder into one file.
@@ -671,9 +673,14 @@ def combine_parshah_docs(
         # Extract info from filename
         filename_stem = get_file_stem(file_path)
         title = filename_stem.replace("-formatted", "")
-        year = extract_year(filename_stem)
-        heading4_info = extract_heading4_info(filename_stem)
-        heading4 = year or heading4_info or title
+        
+        # Determine heading4: use clean filename if option is set, otherwise extract year
+        if use_filename_for_h4:
+            heading4 = title
+        else:
+            year = extract_year(filename_stem)
+            heading4_info = extract_heading4_info(filename_stem)
+            heading4 = year or heading4_info or title
 
         # Set headings on the document
         doc.set_headings(h1=book, h2=sefer, h3=parshah, h4=heading4)
@@ -686,6 +693,7 @@ def combine_parshah_docs(
             "filename": heading4,
             "input_path": str(file_path),
             "skip_parshah_prefix": skip_parshah_prefix,
+            "use_filename_for_h4": use_filename_for_h4,
             "special_heading": processor.special_heading,
             "font_size_heading": processor.font_size_heading,
         }
@@ -977,6 +985,87 @@ def process_seif_footnotes(args, out_dir: Path) -> None:
         traceback.print_exc()
 
 
+def merge_docx_files(input_folder: Path, output_path: Path) -> None:
+    """
+    Merge all docx files in a folder (and subfolders) into one document.
+    
+    This is a simple merge that keeps all content exactly as-is.
+    No processing, no heading extraction, no transformations.
+    Just concatenates all documents in alphabetical order.
+    Recursively searches subfolders and sub-subfolders.
+    
+    Args:
+        input_folder: Folder containing docx files to merge
+        output_path: Path for the merged output file
+    """
+    from docx import Document as DocxDocument
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    
+    # Get all docx files recursively, sorted alphabetically by full path
+    files = sorted(input_folder.rglob("*.docx"))
+    if not files:
+        print(f"No .docx files found in {input_folder} (including subfolders)")
+        return
+    
+    print(f"📂 Merging {len(files)} docx file(s) from {input_folder.name} (including subfolders)")
+    print()
+    
+    # Create new document starting with the first file
+    merged_doc = DocxDocument(str(files[0]))
+    print(f"  [1/{len(files)}] {files[0].name} (base document)")
+    
+    # Append content from remaining files
+    for i, file_path in enumerate(files[1:], 2):
+        print(f"  [{i}/{len(files)}] {file_path.name}")
+        
+        # Read the source document
+        source_doc = DocxDocument(str(file_path))
+        
+        # Add a page break before each new document
+        merged_doc.add_page_break()
+        
+        # Copy all paragraphs from source to merged doc
+        for para in source_doc.paragraphs:
+            # Create new paragraph with same style
+            new_para = merged_doc.add_paragraph()
+            new_para.style = para.style
+            new_para.alignment = para.alignment
+            
+            # Copy paragraph format properties
+            if para.paragraph_format.first_line_indent:
+                new_para.paragraph_format.first_line_indent = para.paragraph_format.first_line_indent
+            if para.paragraph_format.left_indent:
+                new_para.paragraph_format.left_indent = para.paragraph_format.left_indent
+            if para.paragraph_format.right_indent:
+                new_para.paragraph_format.right_indent = para.paragraph_format.right_indent
+            if para.paragraph_format.space_before:
+                new_para.paragraph_format.space_before = para.paragraph_format.space_before
+            if para.paragraph_format.space_after:
+                new_para.paragraph_format.space_after = para.paragraph_format.space_after
+            
+            # Copy runs with their formatting
+            for run in para.runs:
+                new_run = new_para.add_run(run.text)
+                # Copy run formatting
+                new_run.bold = run.bold
+                new_run.italic = run.italic
+                new_run.underline = run.underline
+                if run.font.size:
+                    new_run.font.size = run.font.size
+                if run.font.name:
+                    new_run.font.name = run.font.name
+                if run.font.color and run.font.color.rgb:
+                    new_run.font.color.rgb = run.font.color.rgb
+    
+    # Save merged document
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    merged_doc.save(str(output_path))
+    
+    print()
+    print(f"✅ Merged document saved to: {output_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Reformat Hebrew DOCX files to standardized schema.",
@@ -1077,6 +1166,14 @@ To add new formats, see the word_parser.readers and word_parser.writers packages
         action="store_true",
         help="Merge content and footnotes files by matching seif markers (Hebrew letters). Requires --content-file and --footnotes-file.",
     )
+    parser.add_argument(
+        "--merge",
+        nargs="?",
+        const=True,
+        default=False,
+        metavar="FOLDER",
+        help="Simple merge mode: combine all docx files in a folder into one file. No processing, keeps content exactly as-is. Optionally pass folder path directly.",
+    )
 
     args = parser.parse_args()
 
@@ -1108,6 +1205,28 @@ To add new formats, see the word_parser.readers and word_parser.writers packages
                 else ""
             )
             print(f"  {name}: {desc}")
+        return
+
+    # Handle --merge mode (simple docx merge, no processing)
+    if args.merge:
+        # Use path from --merge if provided, otherwise fall back to --docs
+        if isinstance(args.merge, str):
+            docs_path = Path(args.merge)
+        else:
+            docs_path = Path(args.docs)
+        
+        if not docs_path.exists():
+            print(f"Error: Input path '{docs_path}' does not exist")
+            return
+        if not docs_path.is_dir():
+            print(f"Error: --merge requires a folder path, got file: {docs_path}")
+            return
+        
+        out_dir = Path(args.out)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        output_path = out_dir / f"{docs_path.name}-merged.docx"
+        
+        merge_docx_files(docs_path, output_path)
         return
 
     # Validate --book is provided when not in daf mode or formatted format
