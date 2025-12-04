@@ -144,12 +144,38 @@ class DocxWriter(OutputWriter):
         in_header_section = filter_headers
         current_parshah = None  # Track current parshah for multi-parshah mode
         skip_parshah_prefix = opts.get("skip_parshah_prefix", False)
+        
+        # Track which heading levels were already added by _add_headings
+        # to avoid duplicating them when processing heading paragraphs
+        headings_already_added = {
+            HeadingLevel.HEADING_1: bool(doc.heading1),
+            HeadingLevel.HEADING_2: bool(doc.heading2),
+            HeadingLevel.HEADING_3: bool(doc.heading3),
+            HeadingLevel.HEADING_4: bool(doc.heading4),
+        }
+        # Track heading text that was added to detect duplicates
+        added_heading_texts = {
+            HeadingLevel.HEADING_1: doc.heading1,
+            HeadingLevel.HEADING_2: doc.heading2,
+            HeadingLevel.HEADING_3: doc.heading3,
+            HeadingLevel.HEADING_4: doc.heading4,
+        }
 
         for para in doc.paragraphs:
             txt = para.text.strip()
 
             # Handle heading paragraphs (for combined documents)
             if para.heading_level != HeadingLevel.NORMAL:
+                # Skip if this heading was already added by _add_headings
+                # (same level and same or similar text)
+                already_added_text = added_heading_texts.get(para.heading_level)
+                if already_added_text:
+                    # Check if text matches (with or without prefix for H3)
+                    clean_para_text = txt.replace("פרשת ", "") if txt else ""
+                    clean_added_text = already_added_text.replace("פרשת ", "") if already_added_text else ""
+                    if clean_para_text == clean_added_text:
+                        continue  # Skip duplicate heading
+                
                 # Map heading level to style name
                 style_map = {
                     HeadingLevel.HEADING_1: "Heading 1",
@@ -162,6 +188,8 @@ class DocxWriter(OutputWriter):
                     h = docx_doc.add_paragraph(txt, style=style_name)
                     h.alignment = WD_ALIGN_PARAGRAPH.RIGHT
                     h.paragraph_format.right_to_left = True
+                    # Track this heading so we don't add it again
+                    added_heading_texts[para.heading_level] = txt
                 continue  # Skip to next paragraph
 
             # Handle multi-parshah mode

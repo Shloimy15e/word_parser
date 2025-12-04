@@ -44,6 +44,7 @@ from word_parser.core.formats.perek_h3 import PerekH3Format
 from word_parser.core.formats.formatted import FormattedFormat
 from word_parser.core.formats.h2_only import H2OnlyFormat
 from word_parser.core.formats.folder_filename import FolderFilenameFormat
+from word_parser.core.formats.folder_title import FolderTitleFormat
 from word_parser.core.formats.minimal import MinimalFormat
 from word_parser.core.formats.haus_bachur import HausBachurFormat
 
@@ -63,6 +64,7 @@ __all__ = [
     "FormattedFormat",
     "H2OnlyFormat",
     "FolderFilenameFormat",
+    "FolderTitleFormat",
     "MinimalFormat",
     "HausBachurFormat",
 ]

@@ -291,14 +291,14 @@ class JsonWriter(OutputWriter):
                 chunk_text = "\n".join(current_chunk_text)
                 # Skip single word/letter chunks
                 if not self._is_single_word_or_letter(chunk_text):
-                    # Build chunk title: "H3 - H4 index" or just "H3 index" if no H4
+                    # Build chunk title: "H3 - H4" or just "H3" or "H4" (no index needed)
                     if current_h3:
                         if current_h4:
-                            chunk_title = f"{current_h3} - {current_h4} {h4_index}"
+                            chunk_title = f"{current_h3} - {current_h4}"
                         else:
-                            chunk_title = f"{current_h3} {h4_index}"
+                            chunk_title = current_h3
                     elif current_h4:
-                        chunk_title = f"{current_h4} {h4_index}"
+                        chunk_title = current_h4
                     else:
                         chunk_title = str(chunk_id)
                     
@@ -477,9 +477,9 @@ class JsonWriter(OutputWriter):
                 chunk_text = "\n".join(current_chunk_text)
                 # Skip single word/letter chunks
                 if not self._is_single_word_or_letter(chunk_text):
-                    # Build chunk title: H3 name + chunk number within H3
+                    # Build chunk title: just H3 name (no index needed)
                     if current_h3_title:
-                        chunk_title = f"{current_h3_title} {chunk_index_within_h3}"
+                        chunk_title = current_h3_title
                     else:
                         chunk_title = str(chunk_id)
                     

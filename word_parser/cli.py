@@ -641,11 +641,16 @@ def combine_parshah_docs(
     # Create combined document
     combined_doc = Document()
 
+    # Check if using folder-title format (H3 comes from document content, not folder name)
+    is_folder_title = processor.document_format_name == 'folder-title'
+
     # Add initial headings at the beginning (H1, H2, H3)
-    # These are known and should always appear at the start
-    h3_val = (
-        parshah if skip_parshah_prefix else (f"פרשת {parshah}" if parshah else None)
-    )
+    # For folder-title format, skip initial H3 - it will be detected from document content
+    h3_val = None
+    if not is_folder_title:
+        h3_val = (
+            parshah if skip_parshah_prefix else (f"פרשת {parshah}" if parshah else None)
+        )
 
     if book:
         combined_doc.add_paragraph(book, heading_level=HeadingLevel.HEADING_1)
@@ -702,11 +707,13 @@ def combine_parshah_docs(
         doc = processor._apply_format(doc, context)
 
         # Determine heading values (with prefix handling for H3)
+        # Skip parshah prefix for folder-title format since H3 is document title, not parshah
+        is_folder_title = processor.document_format_name == 'folder-title'
         h1_val = doc.heading1
         h2_val = doc.heading2
         h3_val = (
             doc.heading3
-            if skip_parshah_prefix
+            if skip_parshah_prefix or is_folder_title
             else (f"פרשת {doc.heading3}" if doc.heading3 else None)
         )
         h4_val = doc.heading4
@@ -1233,8 +1240,8 @@ To add new formats, see the word_parser.readers and word_parser.writers packages
     # Formatted format can extract headings from the document itself
     # Skip validation for seif-footnotes mode
     is_seif_footnotes_mode = args.seif_footnotes or (args.content_file and args.footnotes_file)
-    if not is_seif_footnotes_mode and not args.daf and not args.book and getattr(args, "format", None) != "formatted" and getattr(args, "format", None) != "folder-filename":
-        parser.error("--book is required unless using --daf mode or --format formatted or --format folder-filename")
+    if not is_seif_footnotes_mode and not args.daf and not args.book and getattr(args, "format", None) not in ("formatted", "folder-filename", "folder-title"):
+        parser.error("--book is required unless using --daf mode or --format formatted, folder-filename, or folder-title")
 
     docs_path = Path(args.docs)
     out_dir = Path(args.out)

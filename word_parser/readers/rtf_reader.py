@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import List, Optional, Dict
 
-from word_parser.core.document import Document, Paragraph, Alignment, TextRun, RunStyle
+from word_parser.core.document import Document, Paragraph, Alignment, TextRun, RunStyle, Footnote
 from word_parser.readers.base import InputReader, ReaderRegistry
 
 
@@ -78,19 +78,26 @@ class RtfReader(InputReader):
         # Detect the character encoding from the font table
         self._default_charset = self._detect_charset(rtf_text)
         
-        # Parse RTF and extract text
+        # Extract footnotes first (before parsing main content)
+        self._extract_footnotes(rtf_text, doc)
+        
+        # Parse RTF and extract text (footnotes will be replaced with markers)
         paragraphs = self._parse_rtf(rtf_text)
         
-        for para_text, is_bold, is_italic, style_name in paragraphs:
+        for para_text, is_bold, is_italic, font_size, style_name, footnote_refs in paragraphs:
             if para_text.strip():
                 para = doc.add_paragraph()
                 para.format.alignment = Alignment.RIGHT
                 para.format.right_to_left = True
                 para.format.style_name = style_name
                 
-                # Add text with formatting
-                style = RunStyle(bold=is_bold, italic=is_italic)
-                para.runs.append(TextRun(text=para_text, style=style))
+                # Add text with formatting including font size
+                style = RunStyle(bold=is_bold, italic=is_italic, font_size=font_size)
+                run = TextRun(text=para_text, style=style)
+                # If paragraph has footnote references, store them in the run
+                if footnote_refs:
+                    run.footnote_id = footnote_refs[0] if len(footnote_refs) == 1 else footnote_refs
+                para.runs.append(run)
         
         return doc
     
@@ -100,8 +107,10 @@ class RtfReader(InputReader):
         ansi_match = re.search(r'\\ansicpg(\d+)', rtf_text)
         if ansi_match:
             ansi_cp = int(ansi_match.group(1))
-            # Map ANSI code page to charset
-            if ansi_cp == 1255:
+            # Skip invalid code pages (0 means default/unspecified)
+            if ansi_cp == 0:
+                pass  # Fall through to charset detection
+            elif ansi_cp == 1255:
                 return 'cp1255'  # Hebrew
             elif ansi_cp == 1252:
                 return 'cp1252'  # Western
@@ -119,8 +128,9 @@ class RtfReader(InputReader):
                 return 'cp1257'  # Baltic
             elif ansi_cp == 1258:
                 return 'cp1258'  # Vietnamese
-            # For other code pages, try to map
-            return f'cp{ansi_cp}'
+            elif ansi_cp > 0:
+                # For other valid code pages, try to use them
+                return f'cp{ansi_cp}'
         
         # Fallback: Look for \fcharsetN in the fonttbl (prefer Hebrew if found)
         charset_matches = re.findall(r'\\fcharset(\d+)', rtf_text)
@@ -136,11 +146,145 @@ class RtfReader(InputReader):
         
         return 'cp1252'  # Default to Western
     
+    def _extract_footnotes(self, rtf_text: str, doc: Document) -> None:
+        """
+        Extract footnotes from RTF content and add them to the document.
+        
+        RTF footnotes use the syntax: {\\footnote ...footnote content...}
+        The \\chftn control word marks the footnote reference character.
+        """
+        # Find all footnote groups in the RTF
+        # Pattern: {\footnote followed by content until matching }
+        footnote_id = 1
+        i = 0
+        
+        while i < len(rtf_text):
+            # Look for \footnote control word
+            footnote_start = rtf_text.find('\\footnote', i)
+            if footnote_start == -1:
+                break
+            
+            # Find the opening brace before \footnote
+            brace_pos = footnote_start - 1
+            while brace_pos >= 0 and rtf_text[brace_pos] in ' \r\n\t':
+                brace_pos -= 1
+            
+            if brace_pos < 0 or rtf_text[brace_pos] != '{':
+                # Not a proper footnote group, skip
+                i = footnote_start + 9  # len('\\footnote')
+                continue
+            
+            # Find the matching closing brace
+            depth = 1
+            j = footnote_start + 9  # Start after \footnote
+            
+            # Skip optional space after control word
+            if j < len(rtf_text) and rtf_text[j] == ' ':
+                j += 1
+            
+            content_start = j
+            
+            while j < len(rtf_text) and depth > 0:
+                if rtf_text[j] == '{':
+                    depth += 1
+                elif rtf_text[j] == '}':
+                    depth -= 1
+                elif rtf_text[j] == '\\':
+                    # Skip control words
+                    j += 1
+                    while j < len(rtf_text) and rtf_text[j].isalpha():
+                        j += 1
+                    # Skip optional numeric parameter
+                    while j < len(rtf_text) and (rtf_text[j].isdigit() or rtf_text[j] == '-'):
+                        j += 1
+                    continue
+                j += 1
+            
+            if depth == 0:
+                # Extract footnote content (between control word and closing brace)
+                footnote_content = rtf_text[content_start:j-1]
+                
+                # Parse the footnote content
+                footnote_text = self._parse_footnote_content(footnote_content)
+                
+                if footnote_text.strip():
+                    # Create footnote object
+                    footnote = Footnote(id=footnote_id, original_id=footnote_id)
+                    
+                    # Create a paragraph for the footnote content
+                    from word_parser.core.document import Paragraph as FootnotePara
+                    fn_para = FootnotePara()
+                    fn_para.runs.append(TextRun(text=footnote_text.strip()))
+                    footnote.paragraphs.append(fn_para)
+                    
+                    doc.add_footnote(footnote)
+                    print(f"RTF Reader: Extracted footnote {footnote_id}: '{footnote_text[:50]}...'")
+                    footnote_id += 1
+            
+            i = j
+        
+        if footnote_id > 1:
+            print(f"RTF Reader: Extracted {footnote_id - 1} footnote(s)")
+    
+    def _parse_footnote_content(self, content: str) -> str:
+        """Parse the text content of a footnote, handling RTF encoding."""
+        result = []
+        charset = getattr(self, '_default_charset', 'cp1255')
+        
+        i = 0
+        while i < len(content):
+            char = content[i]
+            
+            if char == '\\':
+                control, end_pos = self._parse_control_word(content, i)
+                
+                if control == "'":
+                    # Hex character
+                    if end_pos + 2 <= len(content):
+                        hex_val = content[end_pos:end_pos + 2]
+                        try:
+                            byte_val = int(hex_val, 16)
+                            decoded_char = bytes([byte_val]).decode(charset, errors='replace')
+                            result.append(decoded_char)
+                        except (ValueError, UnicodeDecodeError):
+                            result.append('?')
+                        end_pos += 2
+                elif control.startswith('u') and len(control) > 1 and control[1:].lstrip('-').isdigit():
+                    # Unicode character
+                    try:
+                        unicode_val = int(control[1:])
+                        if unicode_val < 0:
+                            unicode_val += 65536
+                        result.append(chr(unicode_val))
+                    except ValueError:
+                        pass
+                elif control == 'par' or control == 'line':
+                    result.append(' ')  # Replace paragraph breaks with space
+                elif control in ('\\', '{', '}'):
+                    result.append(control)
+                elif control == 'tab':
+                    result.append('\t')
+                elif control == '~':
+                    result.append('\u00A0')
+                # Skip other control words (formatting, etc.)
+                
+                i = end_pos
+            elif char == '{' or char == '}':
+                # Skip braces (nested groups)
+                i += 1
+            elif char == '\r' or char == '\n':
+                i += 1
+            else:
+                result.append(char)
+                i += 1
+        
+        return ''.join(result)
+    
     def _parse_rtf(self, rtf_text: str) -> List[tuple]:
         """
         Parse RTF content and extract paragraphs with basic formatting.
         
-        Returns list of tuples: (text, is_bold, is_italic, style_name)
+        Returns list of tuples: (text, is_bold, is_italic, font_size, style_name, footnote_refs)
         """
         paragraphs = []
         
@@ -182,18 +326,29 @@ class RtfReader(InputReader):
             'showxmlerrors', 'horzdoc', 'dghspace', 'dgvspace', 'dghorigin',
             'dgvorigin', 'dghshow', 'dgvshow', 'jcompress', 'viewkind',
             'viewscale', 'rsidroot', 'fet', 'ilfomacatclnup', 'sectd',
-            'pgnrestart', 'linex', 'endnhere', 'sectdefaultcl', 'sftnbj'
+            'pgnrestart', 'linex', 'endnhere', 'sectdefaultcl', 'sftnbj',
+            # Shapes, text boxes, and drawing objects to skip
+            'shp', 'shpinst', 'shptxt', 'shprslt', 'txbxcontent',
+            'sp', 'sn', 'sv', 'shppict', 'nonshppict', 'pict',
+            'picprop', 'blipuid', 'bliptag', 'wmetafile', 'pngblip',
+            'jpegblip', 'emfblip', 'macpict', 'pmmetafile', 'dibitmap',
+            'wbitmap', 'dib', 'bin',
+            # Footnotes are handled separately
+            'footnote'
         ]
         
         # Track formatting state
         current_text = []
         is_bold = False
         is_italic = False
+        font_size = None  # Font size in points (RTF uses half-points)
         current_style = None
         pending_hex_bytes = []  # Buffer for multi-byte hex sequences
+        footnote_refs = []  # Track footnote references in current paragraph
+        current_footnote_id = 0  # Counter for footnote references
         
         # Stack to track formatting state for nested groups
-        # Each entry is (is_bold, is_italic, current_style)
+        # Each entry is (is_bold, is_italic, font_size, current_style)
         format_stack = []
         
         # Track if we're inside a metadata group (skip all content)
@@ -244,8 +399,13 @@ class RtfReader(InputReader):
                         # Paragraph break
                         text = ''.join(current_text).strip()
                         if text:
-                            paragraphs.append((text, is_bold, is_italic, current_style))
+                            paragraphs.append((text, is_bold, is_italic, font_size, current_style, footnote_refs[:]))
                         current_text = []
+                        footnote_refs = []  # Reset footnote refs for new paragraph
+                    elif control == 'chftn':
+                        # Footnote reference character - increment counter
+                        current_footnote_id += 1
+                        footnote_refs.append(current_footnote_id)
                     elif control == 'b':
                         is_bold = True
                     elif control == 'b0':
@@ -254,6 +414,12 @@ class RtfReader(InputReader):
                         is_italic = True
                     elif control == 'i0':
                         is_italic = False
+                    elif control.startswith('fs') and control[2:].isdigit():
+                        # Font size in half-points (e.g., \fs42 = 21pt)
+                        try:
+                            font_size = int(control[2:]) / 2.0
+                        except ValueError:
+                            pass
                     elif control.startswith('s') and control[1:].isdigit():
                         # Style reference like \s0, \s1
                         pass  # We'll get the style from stylesheet
@@ -306,7 +472,7 @@ class RtfReader(InputReader):
             elif char == '{':
                 # Start of group - save current formatting state
                 if not in_metadata_group:
-                    format_stack.append((is_bold, is_italic, current_style))
+                    format_stack.append((is_bold, is_italic, font_size, current_style))
                 # Flush hex bytes
                 if pending_hex_bytes:
                     decoded = self._decode_hex_bytes(pending_hex_bytes)
@@ -317,7 +483,7 @@ class RtfReader(InputReader):
             elif char == '}':
                 # End of group - restore formatting state
                 if not in_metadata_group and format_stack:
-                    is_bold, is_italic, current_style = format_stack.pop()
+                    is_bold, is_italic, font_size, current_style = format_stack.pop()
                 # Flush hex bytes
                 if pending_hex_bytes:
                     decoded = self._decode_hex_bytes(pending_hex_bytes)
@@ -348,15 +514,19 @@ class RtfReader(InputReader):
         # Don't forget the last paragraph
         text = ''.join(current_text).strip()
         if text:
-            paragraphs.append((text, is_bold, is_italic, current_style))
+            paragraphs.append((text, is_bold, is_italic, font_size, current_style, footnote_refs[:]))
         
         # Filter out paragraphs that are clearly metadata (font names, etc.)
+        # and clean garbage characters from remaining paragraphs
         filtered_paragraphs = []
-        for para_text, is_bold, is_italic, style_name in paragraphs:
+        for para_text, is_bold, is_italic, font_size, style_name, fn_refs in paragraphs:
             # Skip paragraphs that are just font names or metadata
             if self._is_metadata_text(para_text):
                 continue
-            filtered_paragraphs.append((para_text, is_bold, is_italic, style_name))
+            # Clean garbage characters from the text
+            cleaned_text = self._clean_garbage_chars(para_text)
+            if cleaned_text:  # Only add if there's still content after cleaning
+                filtered_paragraphs.append((cleaned_text, is_bold, is_italic, font_size, style_name, fn_refs))
         
         return filtered_paragraphs
     
@@ -370,6 +540,9 @@ class RtfReader(InputReader):
         if text.startswith('http://') or text.startswith('https://'):
             return True
         
+        # NOTE: We no longer skip paragraphs with garbage chars like ()() or ...
+        # Instead, those should be cleaned at the format level while preserving Hebrew content
+        
         # Skip if it contains mostly font names or RTF control words
         # Common font names that might leak through
         font_indicators = ['Times New Roman', 'Arial', 'Cambria', 'Aptos', 'David', 
@@ -379,14 +552,45 @@ class RtfReader(InputReader):
         if font_count >= 2:  # Multiple font indicators = likely metadata
             return True
         
-        # Skip if it's mostly non-Hebrew and looks like metadata
+        # Skip ONLY if there's NO Hebrew content at all and it looks like pure metadata
         # (e.g., "Unknown;", "2450", etc.)
-        if len(text) < 50 and not any('\u0590' <= c <= '\u05ff' for c in text):
+        has_hebrew = any('\u0590' <= c <= '\u05ff' for c in text)
+        if not has_hebrew and len(text) < 50:
             # Check if it contains mostly numbers, punctuation, or English words
             if sum(1 for c in text if c.isalnum() or c in ';:()[]{}') / max(len(text), 1) > 0.8:
                 return True
         
         return False
+    
+    def _clean_garbage_chars(self, text: str) -> str:
+        """
+        Clean garbage characters from text while preserving Hebrew content.
+        
+        Removes:
+        - Sequences of ()()() or )()(
+        - Leading/trailing garbage chars
+        - Multiple consecutive dots (...)
+        """
+        import re
+        if not text:
+            return text
+        
+        # Remove sequences of empty parentheses like ()()() or )()(
+        text = re.sub(r'(\(\))+', '', text)
+        text = re.sub(r'(\)\()+', '', text)
+        
+        # Remove sequences of 3+ dots
+        text = re.sub(r'\.{3,}', '', text)
+        
+        # Remove leading garbage (dots, parentheses, spaces, brackets)
+        text = re.sub(r'^[\s\.\(\)\[\]\{\}]+', '', text)
+        # Remove trailing garbage
+        text = re.sub(r'[\s\.\(\)\[\]\{\}]+$', '', text)
+        
+        # Clean up double/triple spaces
+        text = re.sub(r'\s{2,}', ' ', text)
+        
+        return text.strip()
     
     def _decode_hex_bytes(self, byte_list: List[int]) -> str:
         """Decode a sequence of hex bytes using the detected charset."""

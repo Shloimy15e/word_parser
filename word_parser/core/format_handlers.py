@@ -22,6 +22,7 @@ from word_parser.core.formats import (
     FormattedFormat,
     H2OnlyFormat,
     FolderFilenameFormat,
+    FolderTitleFormat,
 )
 
 # Re-export for backward compatibility
@@ -38,4 +39,5 @@ __all__ = [
     "FormattedFormat",
     "H2OnlyFormat",
     "FolderFilenameFormat",
+    "FolderTitleFormat",
 ]
